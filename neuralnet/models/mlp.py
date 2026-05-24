@@ -19,46 +19,25 @@ from .. import get_logger
 from ..datasets import ParquetDataset
 from ..submitit import ExecutorConfig
 from ..utils import pydantic_to_markdown_schema
+from ..pydantic import ConfigModel
+
+class DenseLayerConfig(ConfigModel):
+    units: int
+    activation: str
+    kernel_initializer: str = Field(default="glorot_uniform")
+    kind: Literal["dense"] = Field("dense", description='Layer kind. Must be "dense"')
+    bias_initializer: str = Field(default="zeros")
+
+    def get(self) -> Dense:
+        return Dense(
+            units=self.units,
+            activation=self.activation,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+        )
 
 
-def get_ring_slices_per_layer(fraction: int) -> list[int]:
-    # We select 1/fraction of rings in each layer
-    # pre-sample - 8 rings
-    # EM1 - 64 rings
-    # EM2 - 8 rings
-    # EM3 - 8 rings
-    # Had1 - 4 rings
-    # Had2 - 4 rings
-    # Had3 - 4 rings
-    rings_indexes = []
-    # rings presmaple
-    rings_indexes += list(range(8 // fraction))
 
-    # EM1 list
-    sum_rings = 8
-    rings_indexes += list(range(sum_rings, sum_rings + (64 // fraction)))
-
-    # EM2 list
-    sum_rings = 8 + 64
-    rings_indexes += list(range(sum_rings, sum_rings + (8 // fraction)))
-
-    # EM3 list
-    sum_rings = 8 + 64 + 8
-    rings_indexes += list(range(sum_rings, sum_rings + (8 // fraction)))
-
-    # HAD1 list
-    sum_rings = 8 + 64 + 8 + 8
-    rings_indexes += list(range(sum_rings, sum_rings + (4 // fraction)))
-
-    # HAD2 list
-    sum_rings = 8 + 64 + 8 + 8 + 4
-    rings_indexes += list(range(sum_rings, sum_rings + (4 // fraction)))
-
-    # HAD3 list
-    sum_rings = 8 + 64 + 8 + 8 + 4 + 4
-    rings_indexes += list(range(sum_rings, sum_rings + (4 // fraction)))
-
-    return rings_indexes
 
 
 def get_model() -> Sequential:
