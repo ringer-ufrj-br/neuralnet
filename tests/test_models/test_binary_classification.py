@@ -118,6 +118,9 @@ def test_binary_classification_job(tmp_path: Path):
     assert zip_0.exists()
     assert zip_1.exists()
 
+    job_config_path = output_path / "job_config.json"
+    assert job_config_path.exists()
+
     import json
 
     # Check contents of zip_0
@@ -145,3 +148,8 @@ def test_binary_classification_job(tmp_path: Path):
     loaded_model = BinaryClassificationModel.load(zip_0, base_dir="model/")
     assert loaded_model.name == "test_model"
     assert loaded_model.keras is not None
+
+    loaded_job = BinaryClassificationJob.load(output_path)
+    assert loaded_job.model.name == "test_model"
+    assert len(loaded_job.models) == 2
+    assert all(model.keras is not None for model in loaded_job.models)

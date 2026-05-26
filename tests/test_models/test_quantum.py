@@ -220,3 +220,13 @@ def test_binary_classification_job_quantum(
             assert config["name"] == f"test_quantum_model_{name}"
             assert len(config["layers"]) == 3
             assert config["layers"][1]["name"] == name
+
+    loaded_model = BinaryClassificationModel.load(zip_1, base_dir="model/")
+    assert loaded_model.name == f"test_quantum_model_{name}"
+    assert loaded_model.keras is not None
+
+    X_test, _ = dataset_config.test_numpy()
+    original_predictions = model_config.predict(X_test[:8])
+    loaded_predictions = loaded_model.predict(X_test[:8])
+
+    np.testing.assert_allclose(original_predictions, loaded_predictions, rtol=1e-6, atol=1e-6)

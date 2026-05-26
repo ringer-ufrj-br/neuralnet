@@ -247,9 +247,9 @@ class BinaryClassificationModel(BaseModel):
         with tempfile.NamedTemporaryFile(suffix=".keras") as tmp:
             self._keras.save(tmp.name)
             with open(tmp.name, "rb") as f:
-                archive.writestr(f"{parent_dir}keras_model.keras", f.read())
+                archive.writestr(f"{parent_dir}model.keras", f.read())
         model_json = self.model_dump_json(indent=4)
-        archive.writestr(f"{parent_dir}model_config.json", model_json)
+        archive.writestr(f"{parent_dir}config.json", model_json)
 
     def save(
         self,
@@ -324,31 +324,39 @@ class BinaryClassificationJob(YamlBaseModel):
     # Misc
     logger_name: LoggerName
 
-    def run(self):
+    models: list[BinaryClassificationModel] = Field(
+        default_factory=list,
+        description="List of models to be trained. This field is populated when the job is loaded.",
+    )
+
+    def submit(self):
         logger = logging.getLogger(self.logger_name)
         logger.info(
             f"Starting job with model {self.model.name} on dataset at {self.dataset.dataset_dir}"
         )
         self.output_path.mkdir(parents=True, exist_ok=False)
-
+        self.output_path.joinpath("job_config.json").write_text(
+            self.model_dump_json(indent=4), encoding="utf-8"
+        )
         n_folds = self.dataset.get_n_folds()
         logger.info(f"The dataset has {n_folds} folds.")
         folds_range = range(n_folds)
         inits_range = range(self.inits)
         executor = self.executor_config.get_executor()
-        for i, (fold, init) in enumerate(product(folds_range, inits_range)):
-            logger.info(f"Submitting training for fold {fold} and init {init}")
-            executor.submit(
-                self._run_training,
-                fold=fold,
-                init=init,
-            )
-            if i > 0 and self.dry_run:
-                logger.info("Dry run enabled, stopping after first iteration.")
-                break
-            logger.info(
-                f"{i} - Submitting training job for fold {fold} and init {init}"
-            )
+        with executor.batch():
+            for i, (fold, init) in enumerate(product(folds_range, inits_range)):
+                logger.info(f"Submitting training for fold {fold} and init {init}")
+                executor.submit(
+                    self._run_training,
+                    fold=fold,
+                    init=init,
+                )
+                if i > 0 and self.dry_run:
+                    logger.info("Dry run enabled, stopping after first iteration.")
+                    break
+                logger.info(
+                    f"{i} - Submitting training job for fold {fold} and init {init}"
+                )
 
         logger.info("All training jobs submitted.")
 
@@ -386,7 +394,6 @@ class BinaryClassificationJob(YamlBaseModel):
         ) as archive:
             self.model.save("", parent_archive=(archive, "model/"))
             archive.writestr("results.json", json.dumps(results, indent=4, cls=NumpyEncoder))
-            archive.writestr("config.json", self.model.model_dump_json(indent=4))
 
     @classmethod
     def load(cls, path: Path | str):
@@ -395,13 +402,15 @@ class BinaryClassificationJob(YamlBaseModel):
         if not path.exists():
             raise FileNotFoundError(f"Path {path} does not exist. Cannot load job.")
 
-        with ZipFile(path, mode="r") as archive:
-            with archive.open("config.json") as config_file:
-                config_dict = json.load(config_file)
-            config_dict["model"] = BinaryClassificationModel.load(
-                path, base_dir="model/", custom_objects=None
-            )
-            job = cls(**config_dict)
+        with path.open('r') as f:
+            job_config = json.load(f)
+        job_config['models'] = []
+
+        for model_zip in path.glob("fold_*_init_*.zip"):
+            model = BinaryClassificationModel.load(model_zip, base_dir="model/")
+            job_config["models"].append(model)
+
+        job = cls(**job_config)
 
         return job
 
