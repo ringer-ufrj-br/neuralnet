@@ -1,6 +1,10 @@
-from typing import Annotated, Literal
-from pydantic import Field, BaseModel
+from functools import cached_property
+from typing import Annotated, Literal, ClassVar
+from pydantic import ConfigDict, Field, BaseModel, PrivateAttr
 import polars as pl
+from torch.utils.data import DataLoader
+import numpy as np
+import numpy.typing as npt
 
 from . import ParquetDataset
 
@@ -55,6 +59,11 @@ class Bin(BaseModel):
 
 
 class RingerParquetDataset(ParquetDataset):
+    model_config = ConfigDict(frozen=True)
+
+    LABEL_COL: ClassVar[Literal["label"]] = "label"
+
+    batch_size: int = Field(32, gt=0, description="Dataset batch size")
     data_table: Annotated[
         str, Field(description="Name of the data table in the parquet dataset")
     ]
@@ -83,10 +92,16 @@ class RingerParquetDataset(ParquetDataset):
             description="Fraction of the rings to be used for training. If 2, takes the first half of the rings for each layer. If 3, takes the first third of the rings, and so on.",
         ),
     ]
-    kind: Literal['ringer_dataset'] = Field(
-        'ringer_dataset',
+    kind: Literal["ringer_dataset"] = Field(
+        "ringer_dataset",
         description="Kind of the dataset. Should be 'ringer_dataset' for this class.",
     )
+    norm_strategy: Literal['l1'] | None = Field(
+        None,
+        description="Normalization strategy to apply to the rings. If None, no normalization is applied. If 'l1', each ring is divided by the sum of all rings for that sample.",
+    )
+
+    _fold: int = PrivateAttr(0)
 
     def get_n_folds(self) -> int:
         n_folds = (
@@ -102,53 +117,189 @@ class RingerParquetDataset(ParquetDataset):
         filters = []
         if self.et_bin is not None:
             et_col_expr = pl.col(self.et_col)
-            filters.append(et_col_expr.is_between(
-                pl.lit(self.et_bin.low, dtype=pl.dtype_of(et_col_expr)),
-                pl.lit(self.et_bin.high, dtype=pl.dtype_of(et_col_expr)),
-                closed=self.et_bin.closed
-            ))
+            filters.append(
+                et_col_expr.is_between(
+                    pl.lit(self.et_bin.low, dtype=pl.dtype_of(et_col_expr)),
+                    pl.lit(self.et_bin.high, dtype=pl.dtype_of(et_col_expr)),
+                    closed=self.et_bin.closed,
+                )
+            )
         if self.eta_bin is not None:
             eta_col_expr = pl.col(self.eta_col)
-            filters.append(eta_col_expr.abs().is_between(
-                pl.lit(self.eta_bin.low, dtype=pl.dtype_of(eta_col_expr)),
-                pl.lit(self.eta_bin.high, dtype=pl.dtype_of(eta_col_expr)),
-                closed=self.eta_bin.closed
-            ))
+            filters.append(
+                eta_col_expr.abs().is_between(
+                    pl.lit(self.eta_bin.low, dtype=pl.dtype_of(eta_col_expr)),
+                    pl.lit(self.eta_bin.high, dtype=pl.dtype_of(eta_col_expr)),
+                    closed=self.eta_bin.closed,
+                )
+            )
         if filters:
             return pl.all_horizontal(*filters)
         return None
-    
+
     def get_rings_expr(self):
         rings = []
+        names = []
         for ring_idx in get_ring_slices_per_layer(self.ring_fraction):
-            rings.append(pl.col(self.rings_col).list.get(ring_idx).alias(f"ring_{ring_idx}"))
+            name = f"ring_{ring_idx}"
+            names.append(name)
+            rings.append(
+                pl.col(self.rings_col).list.get(ring_idx).alias(name)
+            )
+        return rings, names
+    
+    @cached_property
+    def rings_aliases(self) -> list[str]:
+        return [f"ring_{ring_idx}" for ring_idx in get_ring_slices_per_layer(self.ring_fraction)]
+    
+    @cached_property
+    def rings_exprs(self) -> list[pl.Expr]:
+        rings = []
+        for ring_idx, name in zip(get_ring_slices_per_layer(self.ring_fraction), self.rings_aliases):
+            rings.append(
+                pl.col(self.rings_col).list.get(ring_idx).alias(name)
+            )
         return rings
+    
+    @cached_property
+    def l1_norm(self) -> pl.Expr:
+        rings_sum = pl.col(self.rings_col).list.sum().abs()
+        l1_norm = pl.when(
+            rings_sum != 0
+        ).then(
+            rings_sum
+        ).otherwise(
+            pl.lit(1.0, dtype=pl.type_of(rings_sum))
+        )
+        return l1_norm
 
-    def get_fold_data(self, fold: int) -> tuple[pl.LazyFrame, pl.LazyFrame]:
-
-        kfold_df = pl.scan_parquet(self.get_table_glob(self.kfold_table))
+    def get_fold_data(self, group: Literal['train', 'val', 'test', 'predict']) -> pl.LazyFrame:
 
         data_df = pl.scan_parquet(self.get_table_glob(self.data_table))
-        if data_filter := self.get_data_filter():
+        data_filter = self.get_data_filter()
+        if data_filter is not None:
             data_df = data_df.filter(data_filter)
-        data_df = data_df.select('id', *self.get_rings_expr())
+        match self.norm_strategy:
+            case 'l1':
+                l1_alias = self.l1_norm.alias("l1_norm")
+                rings_exprs = [
+                    expr.truediv(l1_alias) for expr in self.rings_exprs
+                ]
+            case None:
+                rings_exprs = self.rings_exprs
+            case _:
+                raise ValueError(f"Invalid normalization strategy: {self.norm_strategy}. Must be one of None or 'l1'.")
+        data_df = data_df.select("id", *rings_exprs)
 
-        
-        label = pl.col(self.label_col).alias('label')
+        label = pl.col(self.label_col).alias(self.LABEL_COL)
         fold_col = pl.col(self.fold_col)
-        fold = pl.lit(fold, dtype=pl.dtype_of(fold_col))
-        val_fold_df = (
-            kfold_df
-            .filter((fold_col == fold) & label.is_not_null())
-            .select("id", label.cast(pl.Int32))
-        )
-        train_fold_df = (
-            kfold_df
-            .filter((fold_col != fold) & label.is_not_null())
-            .select("id", label.cast(pl.Int32))
-        )
+        fold_df = pl.scan_parquet(self.get_table_glob(self.kfold_table))
+        fold = pl.lit(self._fold, dtype=pl.dtype_of(fold_col))
+        match group:
+            case 'train':
+                fold_df = fold_df.filter((label.is_not_null()) & (fold_col != fold)).select("id", label)
+            case 'val':
+                fold_df = fold_df.filter((label.is_not_null()) & (fold_col == fold)).select("id", label)
+            case 'test':
+                fold_df = fold_df.filter(label.is_not_null()).select("id", label)
+            case 'predict':
+                fold_df = fold_df.select("id", label)
+            case _:
+                raise ValueError(f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'.")
 
-        train_df = data_df.join(train_fold_df, on="id", how="inner").drop("id")
-        val_df = data_df.join(val_fold_df, on="id", how="inner").drop("id")
+        return_df = data_df.join(fold_df, on="id", how="inner").drop("id")
 
-        return train_df, val_df
+        return return_df
+
+
+    def train_df(self) -> pl.LazyFrame:
+        return self.get_fold_data('train')
+    
+    def train_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
+        train_df = self.train_df().collect()
+        X = train_df.drop(self.LABEL_COL).to_numpy()
+        y = train_df.select(self.LABEL_COL).to_numpy().flatten()
+        return X, y
+
+    def train_dataloader(self) -> DataLoader:
+        train_df = (
+            self.train_df()
+            .collect()
+            .to_torch(
+                "dataset",
+                label=self.LABEL_COL,
+            )
+        )
+        return DataLoader(train_df, batch_size=self.batch_size, shuffle=True)
+
+    def val_df(self) -> pl.LazyFrame:
+        return self.get_fold_data('val')
+    
+    def val_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
+        val_df = self.val_df().collect()
+        X = val_df.drop(self.LABEL_COL).to_numpy()
+        y = val_df.select(self.LABEL_COL).to_numpy().flatten()
+        return X, y
+
+    def val_dataloader(self) -> DataLoader:
+        val_df = (
+            self.val_df()
+            .collect()
+            .to_torch(
+                "dataset",
+                label=self.LABEL_COL,
+            )
+        )
+        return DataLoader(val_df, batch_size=self.batch_size, shuffle=False)
+    
+    def test_df(self) -> pl.LazyFrame:
+        return self.get_fold_data('test')
+
+    def test_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
+        test_df = self.test_df().collect()
+        X = test_df.drop(self.LABEL_COL).to_numpy()
+        y = test_df.select(self.LABEL_COL).to_numpy().flatten()
+        return X, y
+    
+    def test_dataloader(self) -> DataLoader:
+        test_df = (
+            self.test_df()
+            .collect()
+            .to_torch(
+                "dataset",
+                label=self.LABEL_COL,
+            )
+        )
+        return DataLoader(test_df, batch_size=self.batch_size, shuffle=False)
+
+    def predict_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
+        predict_df = self.predict_df().collect()
+        X = predict_df.drop(self.LABEL_COL).to_numpy()
+        y = predict_df.select(self.LABEL_COL).to_numpy().flatten()
+        return X, y
+
+    def predict_df(self) -> pl.LazyFrame:
+        return self.get_fold_data('predict')
+
+    def predict_dataloader(self) -> DataLoader:
+        predict_df = (
+            self.predict_df()
+            .collect()
+            .to_torch(
+                "dataset",
+                label=self.LABEL_COL,
+            )
+        )
+        return DataLoader(predict_df, batch_size=self.batch_size, shuffle=False)
+
+    def set_fold(self, fold: int) -> None:
+        n_folds = self.get_n_folds()
+        if fold < 0 or fold >= n_folds:
+            raise ValueError(
+                f"Fold index out of range. Must be between 0 and {n_folds - 1}."
+            )
+        self._fold = fold
+
+    @property
+    def current_fold(self) -> int:
+        return self._fold
