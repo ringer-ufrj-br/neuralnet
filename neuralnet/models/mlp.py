@@ -22,11 +22,12 @@ from ..submitit import ExecutorConfig
 from ..utils import pydantic_to_markdown_schema
 from ..pydantic import ConfigModel
 
-class DenseLayerConfig(ConfigModel):
+
+class DenseLayer(BaseModel):
     units: int
     activation: str
     kernel_initializer: str = Field(default="glorot_uniform")
-    kind: Literal["dense"] = Field("dense", description='Layer kind. Must be "dense"')
+    name: Literal["dense"] = Field(default="dense", description='Layer name. Must be "dense"')
     bias_initializer: str = Field(default="zeros")
 
     def get(self) -> Dense:
@@ -36,9 +37,6 @@ class DenseLayerConfig(ConfigModel):
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
         )
-
-
-
 
 
 def get_model() -> Sequential:

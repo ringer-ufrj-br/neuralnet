@@ -19,7 +19,6 @@ from datetime import datetime
 from pathlib import Path
 import zipfile
 from zipfile import ZipFile
-from io import BytesIO
 import json
 import typer
 
@@ -28,31 +27,31 @@ from ..pydantic import YamlBaseModel
 from ..datasets.ringer import RingerParquetDataset
 from ..submitit import ExecutorConfig
 from ..numpy import inverse_sigmoid
-from ..optimizers import AdamOptimizerConfig
+from ..optimizers import AdamOptimizer
 from ..losses import BinaryCrossEntropyLossConfig
 from ..logging import LoggerName
 from ..metrics import ConfusionMatrix
 from ..utils import pydantic_to_markdown_schema
-from .mlp import DenseLayerConfig
+from .mlp import DenseLayer
 from .quantum import (
-    BasicEntanglerQuantumLayerConfig,
-    StronglyEntanglingQuantumLayerConfig,
-    HardwareEfficientQuantumLayerConfig,
+    BasicEntanglerQuantumLayer,
+    StronglyEntanglingQuantumLayer,
+    HardwareEfficientQuantumLayer,
 )
 
 
-type LayerConfigType = Annotated[
+type LayerType = Annotated[
     (
-        DenseLayerConfig
-        | BasicEntanglerQuantumLayerConfig
-        | StronglyEntanglingQuantumLayerConfig
-        | HardwareEfficientQuantumLayerConfig
+        DenseLayer
+        | BasicEntanglerQuantumLayer
+        | StronglyEntanglingQuantumLayer
+        | HardwareEfficientQuantumLayer
     ),
-    Field(discriminator="kind", description="Layer configuration field."),
+    Field(discriminator="name", description="Layer configuration field."),
 ]
 
 type OptimizerConfigType = Annotated[
-    AdamOptimizerConfig,
+    AdamOptimizer,
     Field(discriminator="kind", description="Optimizer configuration field."),
 ]
 
@@ -98,7 +97,7 @@ type ParentArchiveType = tuple[ZipFile, str]
 class BinaryClassificationModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     name: str = Field("keras_sequential", pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-    layers: list[LayerConfigType] = Field(
+    layers: list[LayerType] = Field(
         ..., min_items=1, description="List of sequential model layers."
     )
 

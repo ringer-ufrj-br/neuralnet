@@ -1,13 +1,11 @@
 from typing import Literal
-from pydantic import Field
+from pydantic import Field, BaseModel
 from keras.optimizers import Adam
 
-from .pydantic import ConfigModel
 
-
-class AdamOptimizerConfig(ConfigModel):
+class AdamOptimizer(BaseModel):
     kind: Literal["adam"] = Field(
-        "adam", description='Kind of optimizer. Must be "adam"'
+        "adam", description='This optimizer name.'
     )
 
     learning_rate: float = Field(0.001, description="Learning rate for the optimizer.")

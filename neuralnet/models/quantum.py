@@ -1,13 +1,12 @@
 from typing import Literal
-
-from pydantic import Field
-
-from ..pydantic import ConfigModel
-
+from abc import ABC, abstractmethod
+from pydantic import BaseModel, Field, PrivateAttr
 from keras.layers import TorchModuleWrapper
+from pennylane.qnn import TorchLayer
+import pennylane as qml
 
 
-class QuantumLayerConfig(ConfigModel):
+class QuantumLayer(BaseModel, ABC):
     diff_method: Literal[
         "best",
         "backprop",
@@ -25,7 +24,7 @@ class QuantumLayerConfig(ConfigModel):
     n_layers: int = Field(
         2, gt=0, description="Number of trainable layers in the circuit."
     )
-    device_name: str = Field(
+    device_name: Literal["default.qubit", "lightning.qubit"] = Field(
         "default.qubit", description="PennyLane device name used to build the circuit."
     )
     shots: int | None = Field(
@@ -41,92 +40,126 @@ class QuantumLayerConfig(ConfigModel):
         description="Optional output shape for Keras shape inference.",
     )
 
-    def _build_torch_module_wrapper(self, ansatz, weight_shapes) -> TorchModuleWrapper:
-        import pennylane as qml
+    _device = PrivateAttr(None)
+    _circuit_node = PrivateAttr(None)
 
-        device = qml.device(
+    @staticmethod
+    @abstractmethod
+    def ansatz(weights, wires):
+        pass
+
+    def qnode(self, inputs, weights):
+        qml.AngleEmbedding(inputs, wires=range(self.n_qubits))
+        self.ansatz(weights, wires=range(self.n_qubits))
+        return [qml.expval(qml.PauliZ(wires=i)) for i in range(self.n_qubits)]
+
+    def model_post_init(self, context):
+        res = super().model_post_init(context)
+
+        self._device = qml.device(
             self.device_name,
             wires=self.n_qubits,
         )
 
-        @qml.qnode(device, interface="torch", diff_method=self.diff_method)
-        def qnode(inputs, weights):
-            qml.AngleEmbedding(inputs, wires=range(self.n_qubits))
-            ansatz(weights, wires=range(self.n_qubits))
-            return [qml.expval(qml.PauliZ(wires=i)) for i in range(self.n_qubits)]
+        circuit_node = qml.QNode(
+            self.qnode, self._device, interface="torch", diff_method=self.diff_method
+        )
 
         if self.shots is not None:
-            qnode = qml.set_shots(self.shots)(qnode)
+            circuit_node = qml.set_shots(self.shots)(circuit_node)
 
-        qlayer = qml.qnn.TorchLayer(qnode, weight_shapes)
+        self._node = circuit_node
+
+        return res
+
+    def _build_torch_layer(self, weight_shapes) -> TorchModuleWrapper:
+
+        qlayer = qml.qnn.TorchLayer(self._node, weight_shapes)
+        return qlayer
+
+    def _build_torch_module_wrapper(self, ansatz, weight_shapes) -> TorchModuleWrapper:
+        qlayer = self._build_torch_layer(ansatz, weight_shapes)
         return TorchModuleWrapper(
             qlayer,
             output_shape=self.output_shape or (None, self.n_qubits),
             name=self.name,
         )
 
-
-class BasicEntanglerQuantumLayerConfig(QuantumLayerConfig):
-    kind: Literal["basic_entangler"] = Field(
-        "basic_entangler",
-        description='Quantum layer kind. Uses "qml.BasicEntanglerLayers".',
-    )
+    @abstractmethod
+    def as_torch(self) -> TorchLayer:
+        pass
 
     def get(self) -> TorchModuleWrapper:
-        import pennylane as qml
+        import keras
 
-        def ansatz(weights, wires):
-            qml.BasicEntanglerLayers(weights, wires=wires)
+        backend = keras.config.backend()
+        if backend != "torch":
+            raise ValueError(
+                f"Invalid Keras backend '{backend}'. Quantum layers require the 'torch' backend."
+            )
+        torch_layer = self.as_torch()
+        return TorchModuleWrapper(
+            torch_layer,
+            output_shape=self.output_shape or (None, self.n_qubits),
+            name=self.name,
+        )
 
-        return self._build_torch_module_wrapper(
-            ansatz,
+
+class BasicEntanglerQuantumLayer(QuantumLayer):
+    name: Literal["basic_entangler"] = Field(
+        "basic_entangler",
+        description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
+    )
+
+    @staticmethod
+    def ansatz(weights, wires):
+        qml.BasicEntanglerLayers(weights, wires=wires)
+
+    def as_torch(self) -> TorchLayer:
+        return self._build_torch_layer(
             {"weights": (self.n_layers, self.n_qubits)},
         )
 
 
-class StronglyEntanglingQuantumLayerConfig(QuantumLayerConfig):
-    kind: Literal["strongly_entangling"] = Field(
+class StronglyEntanglingQuantumLayer(QuantumLayer):
+    name: Literal["strongly_entangling"] = Field(
         "strongly_entangling",
-        description='Quantum layer kind. Uses "qml.StronglyEntanglingLayers".',
+        description='Quantum layer name. Uses "qml.StronglyEntanglingLayers".',
     )
 
-    def get(self) -> TorchModuleWrapper:
-        import pennylane as qml
+    @staticmethod
+    def ansatz(weights, wires):
+        qml.StronglyEntanglingLayers(weights, wires=wires)
 
-        def ansatz(weights, wires):
-            qml.StronglyEntanglingLayers(weights, wires=wires)
-
-        return self._build_torch_module_wrapper(
-            ansatz,
+    def as_torch(self) -> TorchLayer:
+        return self._build_torch_layer(
             {"weights": (self.n_layers, self.n_qubits, 3)},
         )
 
 
-class HardwareEfficientQuantumLayerConfig(QuantumLayerConfig):
-    kind: Literal["hardware_efficient"] = Field(
+class HardwareEfficientQuantumLayer(QuantumLayer):
+    name: Literal["hardware_efficient"] = Field(
         "hardware_efficient",
-        description='Quantum layer kind. Uses a hardware-efficient Rot + CNOT ansatz.',
+        description="Quantum layer name. Uses a hardware-efficient Rot + CNOT ansatz.",
     )
 
-    def get(self) -> TorchModuleWrapper:
-        import pennylane as qml
+    @staticmethod
+    def ansatz(weights, wires):
+        wire_list = list(wires)
+        for layer_weights in weights:
+            for wire_index, wire in enumerate(wire_list):
+                qml.Rot(
+                    layer_weights[wire_index, 0],
+                    layer_weights[wire_index, 1],
+                    layer_weights[wire_index, 2],
+                    wires=wire,
+                )
+            for left_wire, right_wire in zip(wire_list, wire_list[1:]):
+                qml.CNOT(wires=[left_wire, right_wire])
+            if len(wire_list) > 1:
+                qml.CNOT(wires=[wire_list[-1], wire_list[0]])
 
-        def ansatz(weights, wires):
-            wire_list = list(wires)
-            for layer_weights in weights:
-                for wire_index, wire in enumerate(wire_list):
-                    qml.Rot(
-                        layer_weights[wire_index, 0],
-                        layer_weights[wire_index, 1],
-                        layer_weights[wire_index, 2],
-                        wires=wire,
-                    )
-                for left_wire, right_wire in zip(wire_list, wire_list[1:]):
-                    qml.CNOT(wires=[left_wire, right_wire])
-                if len(wire_list) > 1:
-                    qml.CNOT(wires=[wire_list[-1], wire_list[0]])
-
-        return self._build_torch_module_wrapper(
-            ansatz,
+    def as_torch(self) -> TorchLayer:
+        return self._build_torch_layer(
             {"weights": (self.n_layers, self.n_qubits, 3)},
         )
