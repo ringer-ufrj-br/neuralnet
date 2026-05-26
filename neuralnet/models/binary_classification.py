@@ -247,7 +247,8 @@ class BinaryClassificationModel(BaseModel):
         with tempfile.NamedTemporaryFile(suffix=".keras") as tmp:
             self._keras.save(tmp.name)
             with open(tmp.name, "rb") as f:
-                archive.writestr(f"{parent_dir}model.keras", f.read())
+                model_bytes = f.read()
+                archive.writestr(f"{parent_dir}model.keras", model_bytes)
         model_json = self.model_dump_json(indent=4)
         archive.writestr(f"{parent_dir}config.json", model_json)
 
@@ -280,17 +281,23 @@ class BinaryClassificationModel(BaseModel):
             base_dir += "/"
 
         with zipfile.ZipFile(path, mode="r") as archive:
-            with archive.open(f"{base_dir}model_config.json") as config_file:
+            with archive.open(f"{base_dir}config.json") as config_file:
                 config_dict = json.load(config_file)
                 model = cls(**config_dict)
             import tempfile
             with tempfile.NamedTemporaryFile(suffix=".keras") as tmp:
-                tmp.write(archive.read(f"{base_dir}keras_model.keras"))
+                tmp.write(archive.read(f"{base_dir}model.keras"))
                 tmp.flush()
-                keras_model = load_model(tmp.name, custom_objects=custom_objects)
+                keras_model = load_model(tmp.name, custom_objects=custom_objects, safe_mode=False)
 
         model.set_keras(keras_model)
         return model
+    
+    def new(self, **kwargs) -> "BinaryClassificationModel":
+        """Create a new instance of the model with the same configuration but a new Keras model."""
+        config_dict = self.model_dump()
+        config_dict.update(kwargs)
+        return BinaryClassificationModel(**config_dict)
 
 
 type BinaryClassificationJobDatasetType = Annotated[
@@ -335,7 +342,7 @@ class BinaryClassificationJob(YamlBaseModel):
             f"Starting job with model {self.model.name} on dataset at {self.dataset.dataset_dir}"
         )
         self.output_path.mkdir(parents=True, exist_ok=False)
-        self.output_path.joinpath("job_config.json").write_text(
+        self.output_path.joinpath("config.json").write_text(
             self.model_dump_json(indent=4), encoding="utf-8"
         )
         n_folds = self.dataset.get_n_folds()
@@ -366,15 +373,19 @@ class BinaryClassificationJob(YamlBaseModel):
         self.dataset.set_fold(fold)
         train_numpy = self.dataset.train_numpy()
         val_numpy = self.dataset.val_numpy()
-        results = dict()
-        results["fit"] = self.model.fit(train_numpy, val_numpy, callbacks=[]).history
+        results = {
+            'fold': fold,
+            'init': init,
+        }
+        model = self.model.new(name=f"{self.model.name}_fold_{fold}_init_{init}")
+        results["fit"] = model.fit(train_numpy, val_numpy, callbacks=[]).history
         logger.info(f"Finished training for fold {fold} and init {init}")
-        results["train"] = self.model.evaluate(train_numpy).to_dict(full=True)
+        results["train"] = model.evaluate(train_numpy).to_dict(full=True)
         del train_numpy
-        results["val"] = self.model.evaluate(val_numpy).to_dict(full=True)
+        results["val"] = model.evaluate(val_numpy).to_dict(full=True)
         del val_numpy
         test_numpy = self.dataset.test_numpy()
-        results["test"] = self.model.evaluate(test_numpy).to_dict(full=True)
+        results["test"] = model.evaluate(test_numpy).to_dict(full=True)
         del test_numpy
         logger.info(f"Finished evaluating for fold {fold} and init {init}")
         output_path = self.output_path / f"fold_{fold}_init_{init}"
@@ -392,7 +403,7 @@ class BinaryClassificationJob(YamlBaseModel):
         with ZipFile(
             output_path.with_suffix(".zip"), mode="w", compression=zipfile.ZIP_DEFLATED
         ) as archive:
-            self.model.save("", parent_archive=(archive, "model/"))
+            model.save("", parent_archive=(archive, "model/"))
             archive.writestr("results.json", json.dumps(results, indent=4, cls=NumpyEncoder))
 
     @classmethod
@@ -402,7 +413,7 @@ class BinaryClassificationJob(YamlBaseModel):
         if not path.exists():
             raise FileNotFoundError(f"Path {path} does not exist. Cannot load job.")
 
-        with path.open('r') as f:
+        with path.joinpath("config.json").open('r') as f:
             job_config = json.load(f)
         job_config['models'] = []
 
