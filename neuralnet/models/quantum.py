@@ -35,27 +35,34 @@ class QuantumLayer(BaseModel, ABC):
     name: str | None = Field(
         default=None, description="Optional Keras layer name for the wrapped circuit."
     )
-    output_shape: tuple[int | None, ...] | None = Field(
+    output_qubits: int | tuple[int, ...] | None = Field(
         default=None,
-        description="Optional output shape for Keras shape inference.",
+        description="Number of qubits or indices of qubits whose expectation values are returned as output. If None, defaults to all qubits.",
     )
 
     _device = PrivateAttr(None)
     _circuit_node = PrivateAttr(None)
 
-    @staticmethod
-    @abstractmethod
-    def ansatz(weights, wires):
-        pass
-
-    def qnode(self, inputs, weights):
-        qml.AngleEmbedding(inputs, wires=range(self.n_qubits))
-        self.ansatz(weights, wires=range(self.n_qubits))
-        return [qml.expval(qml.PauliZ(wires=i)) for i in range(self.n_qubits)]
-
-    def model_post_init(self, context):
-        res = super().model_post_init(context)
-
+    def _validate_output_qubits(self):
+        if self.output_qubits is None:
+            self.output_qubits = tuple(range(self.n_qubits))
+        elif isinstance(self.output_qubits, int):
+            if self.output_qubits > self.n_qubits:
+                raise ValueError(
+                    f"output_qubits cannot be greater than n_qubits. Got output_qubits={self.output_qubits} and n_qubits={self.n_qubits}."
+                )
+            self.output_qubits = (self.output_qubits,)
+        elif isinstance(self.output_qubits, tuple):
+            if any(q >= self.n_qubits for q in self.output_qubits):
+                raise ValueError(
+                    f"All qubit indices in output_qubits must be less than n_qubits. Got output_qubits={self.output_qubits} and n_qubits={self.n_qubits}."
+                )
+        else:
+            raise ValueError(
+                f"output_qubits must be an int, a tuple of ints, or None. Got {type(self.output_qubits).__name__}."
+            )
+    
+    def _build_node(self):
         self._device = qml.device(
             self.device_name,
             wires=self.n_qubits,
@@ -70,7 +77,25 @@ class QuantumLayer(BaseModel, ABC):
 
         self._node = circuit_node
 
-        return res
+    def model_post_init(self, context):
+        self._validate_output_qubits()
+        self._build_node()
+        return super().model_post_init(context)
+
+    @property
+    def output_shape(self):
+        # Model post init ensures output_qubits is always a tuple of ints at this point
+        return (None, len(self.output_qubits))
+
+    @staticmethod
+    @abstractmethod
+    def ansatz(weights, wires):
+        pass
+
+    def qnode(self, inputs, weights):
+        qml.AngleEmbedding(inputs, wires=range(self.n_qubits))
+        self.ansatz(weights, wires=range(self.n_qubits))
+        return [qml.expval(qml.PauliZ(wires=i)) for i in self.output_qubits]
 
     def _build_torch_layer(self, weight_shapes) -> TorchModuleWrapper:
 
@@ -81,7 +106,7 @@ class QuantumLayer(BaseModel, ABC):
         qlayer = self._build_torch_layer(ansatz, weight_shapes)
         return TorchModuleWrapper(
             qlayer,
-            output_shape=self.output_shape or (None, self.n_qubits),
+            output_shape=self.output_shape,
             name=self.name,
         )
 
@@ -100,7 +125,7 @@ class QuantumLayer(BaseModel, ABC):
         torch_layer = self.as_torch()
         return TorchModuleWrapper(
             torch_layer,
-            output_shape=self.output_shape or (None, self.n_qubits),
+            output_shape=self.output_shape,
             name=self.name,
         )
 

@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, TypedDict
 from itertools import product
 from keras.models import Sequential, load_model
 from keras.metrics import (
@@ -10,15 +10,14 @@ from keras.metrics import (
     FalsePositives,
     Recall,
 )
-from keras.callbacks import History, Callback
+from keras.callbacks import Callback, History
 from pydantic import BaseModel, Field, PrivateAttr, ConfigDict
 import numpy as np
 import numpy.typing as npt
 import logging
 from datetime import datetime
 from pathlib import Path
-import zipfile
-from zipfile import ZipFile
+import polars as pl
 import json
 import typer
 
@@ -30,7 +29,7 @@ from ..numpy import inverse_sigmoid
 from ..optimizers import AdamOptimizer
 from ..losses import BinaryCrossEntropyLossConfig
 from ..logging import LoggerName
-from ..metrics import ConfusionMatrix
+from ..metrics import ConfusionMatrix, ConfusionMatrixDict
 from ..utils import pydantic_to_markdown_schema
 from .mlp import DenseLayer
 from .quantum import (
@@ -91,7 +90,17 @@ type ModelDatasetType = Annotated[
     Field(description="Validation dataset as a tuple of (X_val, y_val)"),
 ]
 
-type ParentArchiveType = tuple[ZipFile, str]
+class BinaryClassificationModelHistory(TypedDict):
+    loss: list[float]
+    accuracy: list[float]
+    true_negatives: list[npt.NDArray[np.floating]]
+    true_positives: list[npt.NDArray[np.floating]]
+    false_negatives: list[npt.NDArray[np.floating]]
+    false_positives: list[npt.NDArray[np.floating]]
+    recall: list[npt.NDArray[np.floating]]
+    max_sp_val: list[float]
+    max_sp_pd_val: list[float]
+    max_sp_best_epoch: list[int]
 
 
 class BinaryClassificationModel(BaseModel):
@@ -200,13 +209,25 @@ class BinaryClassificationModel(BaseModel):
                 save_the_best=True,
             )
         ]
+    
+    def _clean_history(self, history: History) -> BinaryClassificationModelHistory:
+        new_history = {}
+        for key, value in history.history.items():
+            splitted_key = key.split('_')
+            try:
+                float(splitted_key[-1])
+                new_key = '_'.join(splitted_key[:-1])
+                new_history[new_key] = value
+            except (ValueError, IndexError):
+                new_history[key] = value
+        return new_history
 
     def fit(
         self,
         train_dataset: ModelDatasetType,
         val_dataset: ModelDatasetType,
         callbacks: list[Callback],
-    ) -> History:
+    ) -> BinaryClassificationModelHistory:
         logger = logging.getLogger(self.logger_name)
         callbacks = callbacks + self.get_callbacks(val_dataset)
         start = datetime.now()
@@ -221,6 +242,8 @@ class BinaryClassificationModel(BaseModel):
         end = datetime.now()
         logger.info(f"Finished training for model {self.name} with history: {history}")
         logger.info(f"Training step: {end - start}")
+
+        history = self._clean_history(history)
 
         return history
 
@@ -240,56 +263,35 @@ class BinaryClassificationModel(BaseModel):
 
         return results
 
-    def _save_to_zip(self, archive: ZipFile, parent_dir: str):
-        import tempfile
-        if parent_dir and not parent_dir.endswith("/"):
-            parent_dir += "/"
-        with tempfile.NamedTemporaryFile(suffix=".keras") as tmp:
-            self._keras.save(tmp.name)
-            with open(tmp.name, "rb") as f:
-                model_bytes = f.read()
-                archive.writestr(f"{parent_dir}model.keras", model_bytes)
-        model_json = self.model_dump_json(indent=4)
-        archive.writestr(f"{parent_dir}config.json", model_json)
-
     def save(
         self,
-        path: Path | str,
-        compression: int = zipfile.ZIP_DEFLATED,
-        parent_archive: ParentArchiveType | None = None,
+        path: Path | str
     ):
-        if parent_archive is None:
-            if isinstance(path, str):
-                path = Path(path)
-            if path.exists():
-                raise FileExistsError(
-                    f"Path {path} already exists. Please provide a non existing path to save the model."
-                )
-            with zipfile.ZipFile(path, mode="w", compression=compression) as archive:
-                self._save_to_zip(archive, "")
-        else:
-            self._save_to_zip(parent_archive[0], parent_archive[1])
+        if isinstance(path, str):
+            path = Path(path)
+        if path.exists():
+            raise FileExistsError(f"Path {path} already exists. Cannot save model.")
+        if path.is_file():
+            raise FileExistsError(f"Path {path} is a file. Cannot save model.")
+        
+        path.mkdir(parents=True, exist_ok=False)
+        self._keras.save(path.joinpath("model.keras"))
+        with path.joinpath("config.json").open("w", encoding="utf-8") as f:
+            json.dump(self.model_dump(), f, indent=4)
 
     @classmethod
-    def load(cls, path: Path | str, base_dir: str = "", custom_objects: Any = None):
+    def load(cls, path: Path | str, custom_objects: Any = None):
         if isinstance(path, str):
             path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Path {path} does not exist. Cannot load model.")
-
-        if base_dir and not base_dir.endswith("/"):
-            base_dir += "/"
-
-        with zipfile.ZipFile(path, mode="r") as archive:
-            with archive.open(f"{base_dir}config.json") as config_file:
-                config_dict = json.load(config_file)
-                model = cls(**config_dict)
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".keras") as tmp:
-                tmp.write(archive.read(f"{base_dir}model.keras"))
-                tmp.flush()
-                keras_model = load_model(tmp.name, custom_objects=custom_objects, safe_mode=False)
-
+        if path.is_file():
+            raise FileNotFoundError(f"Path {path} is a file. Cannot load model.")
+        
+        with path.joinpath("config.json").open("r", encoding="utf-8") as f:
+            config_dict = json.load(f)
+            model = cls(**config_dict)
+        keras_model = load_model(path.joinpath("model.keras"), custom_objects=custom_objects, safe_mode=False)
         model.set_keras(keras_model)
         return model
     
@@ -297,7 +299,12 @@ class BinaryClassificationModel(BaseModel):
         """Create a new instance of the model with the same configuration but a new Keras model."""
         config_dict = self.model_dump()
         config_dict.update(kwargs)
-        return BinaryClassificationModel(**config_dict)
+        try:
+            return BinaryClassificationModel(**config_dict)
+        finally:
+            model = self._keras
+            self._keras = None
+            del model
 
 
 type BinaryClassificationJobDatasetType = Annotated[
@@ -308,8 +315,20 @@ type BinaryClassificationJobDatasetType = Annotated[
     ),
 ]
 
+class BinaryClassificationModelResultsDict(TypedDict):
+    fold: int
+    init: int
+    fit: BinaryClassificationModelHistory
+    train: ConfusionMatrixDict
+    val: ConfusionMatrixDict
+    test: ConfusionMatrixDict
+
 
 class BinaryClassificationJob(YamlBaseModel):
+
+    model_config = ConfigDict(extra="forbid", frozen=True,
+                              arbitrary_types_allowed=True)
+
     dataset: BinaryClassificationJobDatasetType
     model: BinaryClassificationModel
 
@@ -335,6 +354,10 @@ class BinaryClassificationJob(YamlBaseModel):
         default_factory=list,
         description="List of models to be trained. This field is populated when the job is loaded.",
     )
+    results: pl.DataFrame | None = Field(
+        default=None,
+        description="DataFrame to store the results of the job. This field is populated after the job is run."
+    )
 
     def submit(self):
         logger = logging.getLogger(self.logger_name)
@@ -343,7 +366,7 @@ class BinaryClassificationJob(YamlBaseModel):
         )
         self.output_path.mkdir(parents=True, exist_ok=False)
         self.output_path.joinpath("config.json").write_text(
-            self.model_dump_json(indent=4), encoding="utf-8"
+            self.model_dump_json(indent=4, exclude={'models', 'results'}), encoding="utf-8"
         )
         n_folds = self.dataset.get_n_folds()
         logger.info(f"The dataset has {n_folds} folds.")
@@ -373,19 +396,19 @@ class BinaryClassificationJob(YamlBaseModel):
         self.dataset.set_fold(fold)
         train_numpy = self.dataset.train_numpy()
         val_numpy = self.dataset.val_numpy()
-        results = {
+        results: BinaryClassificationModelResultsDict = {
             'fold': fold,
             'init': init,
         }
         model = self.model.new(name=f"{self.model.name}_fold_{fold}_init_{init}")
-        results["fit"] = model.fit(train_numpy, val_numpy, callbacks=[]).history
+        results["fit"] = model.fit(train_numpy, val_numpy, callbacks=[])
         logger.info(f"Finished training for fold {fold} and init {init}")
-        results["train"] = model.evaluate(train_numpy).to_dict(full=True)
+        results["train"] = model.evaluate(train_numpy).to_dict()
         del train_numpy
-        results["val"] = model.evaluate(val_numpy).to_dict(full=True)
+        results["val"] = model.evaluate(val_numpy).to_dict()
         del val_numpy
         test_numpy = self.dataset.test_numpy()
-        results["test"] = model.evaluate(test_numpy).to_dict(full=True)
+        results["test"] = model.evaluate(test_numpy).to_dict()
         del test_numpy
         logger.info(f"Finished evaluating for fold {fold} and init {init}")
         output_path = self.output_path / f"fold_{fold}_init_{init}"
@@ -399,12 +422,10 @@ class BinaryClassificationJob(YamlBaseModel):
                 elif isinstance(obj, np.integer):
                     return int(obj)
                 return super().default(obj)
-
-        with ZipFile(
-            output_path.with_suffix(".zip"), mode="w", compression=zipfile.ZIP_DEFLATED
-        ) as archive:
-            model.save("", parent_archive=(archive, "model/"))
-            archive.writestr("results.json", json.dumps(results, indent=4, cls=NumpyEncoder))
+        
+        model.save(output_path)
+        with output_path.joinpath("results.json").open("w", encoding="utf-8") as f:
+            json.dump(results, f, indent=4, cls=NumpyEncoder)
 
     @classmethod
     def load(cls, path: Path | str):
@@ -412,17 +433,25 @@ class BinaryClassificationJob(YamlBaseModel):
             path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Path {path} does not exist. Cannot load job.")
+        if path.is_file():
+            raise FileNotFoundError(f"Path {path} is a file. Cannot load job.")
 
         with path.joinpath("config.json").open('r') as f:
             job_config = json.load(f)
+
         job_config['models'] = []
+        results = []
 
-        for model_zip in path.glob("fold_*_init_*.zip"):
-            model = BinaryClassificationModel.load(model_zip, base_dir="model/")
+        for model_dir in path.glob("fold_*_init_*"):
+            if model_dir.is_file():
+                raise FileNotFoundError(f"Expected {model_dir} to be a directory containing the model and results, but it is a file.")
+            model = BinaryClassificationModel.load(model_dir)
             job_config["models"].append(model)
-
+            with model_dir.joinpath("results.json").open('r') as f:
+                res = json.load(f)
+                results.append(res)
+        job_config['results'] = pl.from_dicts(results)
         job = cls(**job_config)
-
         return job
 
 

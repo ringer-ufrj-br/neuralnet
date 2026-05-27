@@ -1,5 +1,6 @@
 import pytest
 import keras
+import numpy as np
 
 from neuralnet.models import quantum
 
@@ -35,7 +36,6 @@ from neuralnet.models import quantum
                 "n_qubits": 4,
                 "n_layers": 2,
                 "name": "hardware_efficient",
-                "output_shape": (None, 7),
                 "shots": 128,
                 "diff_method": "finite-diff",
             },
@@ -64,3 +64,16 @@ def test_quantum_layer_config_get_returns_torch_module_wrapper(
         kwargs.get("output_shape", (None, kwargs["n_qubits"]))
     )
     assert layer.name == kwargs["name"]
+
+    batch = 2
+    inp = np.random.RandomState(42).randn(batch, kwargs["n_qubits"]).astype(np.float32)
+    out = layer(inp)
+
+    # convert to numpy if this is a tensor-like object
+    try:
+        out_np = out.detach().cpu().numpy()
+    except Exception:
+        out_np = np.array(out)
+
+    expected_dim = kwargs.get("output_shape", (None, kwargs["n_qubits"]))[1]
+    assert out_np.shape == (batch, expected_dim)

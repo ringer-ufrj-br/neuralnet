@@ -183,24 +183,21 @@ def test_binary_classification_job(
         )
 
 
-def test_binary_classification_model_save_load_predict_same_output(tmp_path: Path):
-    model = BinaryClassificationModel(
-        name="predict_equivalence_model",
-        layers=[
-            DenseLayer(units=4, activation="relu"),
-            DenseLayer(units=1, activation="sigmoid"),
-        ],
-        loss=BinaryCrossEntropyLossConfig(
-            kind="binary_cross_entropy", from_logits=False
-        ),
-        optimizer=AdamOptimizer(learning_rate=0.01, kind="adam"),
-        from_logits=False,
-        num_thresholds=10,
-        lower_threshold=0.1,
-        upper_threshold=0.9,
-        epochs=1,
-        logger_name="test_logger",
-    )
+test_binary_classification_model_save_load_predict_same_output_params = {
+    "mlp": MLP_CONFIG,
+    "basic_entangler": BASIC_ENTANGLER_CONFIG,
+    "strongly_entangling": STRONGLY_ENTANGLING_CONFIG,
+    "hardware_efficient": HARDWARE_EFFICIENT_CONFIG,
+}
+
+
+@pytest.mark.parametrize(
+    ("model_config"),
+    list(test_binary_classification_model_save_load_predict_same_output_params.values()),
+    ids=list(test_binary_classification_model_save_load_predict_same_output_params.keys()),
+)
+def test_binary_classification_model_save_load_predict_same_output(tmp_path: Path, model_config: dict):
+    model = BinaryClassificationModel(**model_config)
 
     rng = np.random.default_rng(42)
     x = rng.normal(size=(8, 100)).astype(np.float32)

@@ -1,9 +1,24 @@
 from dataclasses import dataclass
+from typing import TypedDict
 import numpy as np
 import numpy.typing as npt
 from functools import cached_property
 import json
 from pathlib import Path
+
+
+class ConfusionMatrixDict(TypedDict):
+    loss: float
+    tn: list[int]
+    tp: list[int]
+    fn: list[int]
+    fp: list[int]
+    thresholds: list[float]
+    accuracy: list[float]
+    tpr: list[float]
+    fpr: list[float]
+    sp_index: list[float]
+    auc: float
 
 
 @dataclass(frozen=True)
@@ -75,24 +90,20 @@ class ConfusionMatrix:
         sorted_pd = self.pd[sorted_indices]
         return np.trapezoid(sorted_pd, sorted_fpr)
 
-    def to_dict(self, full: bool = False) -> dict[str, list[float | int] | float]:
-        res = {
+    def to_dict(self) -> ConfusionMatrixDict:
+        return {
             "loss": float(self.loss),
             "tn": self.tn.tolist(),
             "tp": self.tp.tolist(),
             "fn": self.fn.tolist(),
             "fp": self.fp.tolist(),
             "thresholds": self.thresholds.tolist(),
+            'accuracy': self.accuracy.tolist(),
+            'tpr': self.tpr.tolist(),
+            'fpr': self.fpr.tolist(),
+            'sp_index': self.sp_index.tolist(),
+            'auc': float(self.auc),
         }
-        if not full:
-            return res
-
-        res["accuracy"] = self.accuracy.tolist()
-        res["tpr"] = self.tpr.tolist()
-        res["fpr"] = self.fpr.tolist()
-        res["sp_index"] = self.sp_index.tolist()
-        res["auc"] = float(self.auc)
-        return res
 
     @classmethod
     def from_json(cls, filepath: str | Path) -> "ConfusionMatrix":
