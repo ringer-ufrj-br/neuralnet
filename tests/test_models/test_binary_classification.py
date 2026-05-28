@@ -26,7 +26,7 @@ DATASET_CONFIG = {
     "eta_bin": {"low": 0.0, "high": 2.5, "closed": "left"},
     "ring_fraction": 1,
     "batch_size": 32,
-    "kind": "ringer_dataset",
+    "object_type": "ringer_parquet_dataset",
 }
 
 JOB_CONFIG = {
@@ -41,12 +41,13 @@ JOB_CONFIG = {
 
 MLP_CONFIG = {
     "name": "test_model",
+    "object_type": "binary_classification_model",
     "layers": [
-        {"name": "dense", "units": 4, "activation": "relu"},
-        {"name": "dense", "units": 1, "activation": "sigmoid"},
+        {"object_type": "dense", "units": 4, "activation": "relu"},
+        {"object_type": "dense", "units": 1, "activation": "sigmoid"},
     ],
-    "loss": {"kind": "binary_cross_entropy", "from_logits": False},
-    "optimizer": {"learning_rate": 0.01, "kind": "adam"},
+    "loss": {"object_type": "binary_cross_entropy", "from_logits": False},
+    "optimizer": {"learning_rate": 0.01, "object_type": "adam"},
     "from_logits": False,
     "num_thresholds": 10,
     "lower_threshold": 0.1,
@@ -57,13 +58,14 @@ MLP_CONFIG = {
 
 BASIC_ENTANGLER_CONFIG = {
     "name": "test_quantum_model_basic_entangler",
+    "object_type": "binary_classification_model",
     "layers": [
-        {"name": "dense", "units": 4, "activation": "relu"},
-        {"name": "basic_entangler", "n_qubits": 4, "n_layers": "2"},
-        {"name": "dense", "units": 1, "activation": "sigmoid"},
+        {"object_type": "dense", "units": 4, "activation": "relu"},
+        {"object_type": "basic_entangler", "n_qubits": 4, "n_layers": "2"},
+        {"object_type": "dense", "units": 1, "activation": "sigmoid"},
     ],
-    "loss": {"kind": "binary_cross_entropy", "from_logits": False},
-    "optimizer": {"learning_rate": 0.01, "kind": "adam"},
+    "loss": {"object_type": "binary_cross_entropy", "from_logits": False},
+    "optimizer": {"learning_rate": 0.01, "object_type": "adam"},
     "from_logits": False,
     "num_thresholds": 10,
     "lower_threshold": 0.1,
@@ -74,13 +76,14 @@ BASIC_ENTANGLER_CONFIG = {
 
 STRONGLY_ENTANGLING_CONFIG = {
     "name": "test_quantum_model_strongly_entangling",
+    "object_type": "binary_classification_model",    
     "layers": [
-        {"name": "dense", "units": 4, "activation": "relu"},
-        {"name": "strongly_entangling", "n_qubits": 4, "n_layers": "2"},
-        {"name": "dense", "units": 1, "activation": "sigmoid"},
+        {"object_type": "dense", "units": 4, "activation": "relu"},
+        {"object_type": "strongly_entangling", "n_qubits": 4, "n_layers": "2"},
+        {"object_type": "dense", "units": 1, "activation": "sigmoid"},
     ],
-    "loss": {"kind": "binary_cross_entropy", "from_logits": False},
-    "optimizer": {"learning_rate": 0.01, "kind": "adam"},
+    "loss": {"object_type": "binary_cross_entropy", "from_logits": False},
+    "optimizer": {"learning_rate": 0.01, "object_type": "adam"},
     "from_logits": False,
     "num_thresholds": 10,
     "lower_threshold": 0.1,
@@ -91,13 +94,14 @@ STRONGLY_ENTANGLING_CONFIG = {
 
 HARDWARE_EFFICIENT_CONFIG = {
     "name": "test_quantum_model_hardware_efficient",
+    "object_type": "binary_classification_model",
     "layers": [
-        {"name": "dense", "units": 4, "activation": "relu"},
-        {"name": "hardware_efficient", "n_qubits": 4, "n_layers": "2"},
-        {"name": "dense", "units": 1, "activation": "sigmoid"},
+        {"object_type": "dense", "units": 4, "activation": "relu"},
+        {"object_type": "hardware_efficient", "n_qubits": 4, "n_layers": "2"},
+        {"object_type": "dense", "units": 1, "activation": "sigmoid"},
     ],
-    "loss": {"kind": "binary_cross_entropy", "from_logits": False},
-    "optimizer": {"learning_rate": 0.01, "kind": "adam"},
+    "loss": {"object_type": "binary_cross_entropy", "from_logits": False},
+    "optimizer": {"learning_rate": 0.01, "object_type": "adam"},
     "from_logits": False,
     "num_thresholds": 10,
     "lower_threshold": 0.1,

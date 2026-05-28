@@ -131,7 +131,7 @@ class QuantumLayer(BaseModel, ABC):
 
 
 class BasicEntanglerQuantumLayer(QuantumLayer):
-    name: Literal["basic_entangler"] = Field(
+    object_type: Literal["basic_entangler"] = Field(
         "basic_entangler",
         description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
     )
@@ -147,7 +147,7 @@ class BasicEntanglerQuantumLayer(QuantumLayer):
 
 
 class StronglyEntanglingQuantumLayer(QuantumLayer):
-    name: Literal["strongly_entangling"] = Field(
+    object_type: Literal["strongly_entangling"] = Field(
         "strongly_entangling",
         description='Quantum layer name. Uses "qml.StronglyEntanglingLayers".',
     )
@@ -163,7 +163,7 @@ class StronglyEntanglingQuantumLayer(QuantumLayer):
 
 
 class HardwareEfficientQuantumLayer(QuantumLayer):
-    name: Literal["hardware_efficient"] = Field(
+    object_type: Literal["hardware_efficient"] = Field(
         "hardware_efficient",
         description="Quantum layer name. Uses a hardware-efficient Rot + CNOT ansatz.",
     )

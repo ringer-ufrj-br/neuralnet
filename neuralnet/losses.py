@@ -1,12 +1,10 @@
 from typing import Literal
 from keras.losses import BinaryCrossentropy
-from pydantic import Field
-
-from .pydantic import ConfigModel
+from pydantic import BaseModel, Field
 
 
-class BinaryCrossEntropyLossConfig(ConfigModel):
-    kind: Literal["binary_cross_entropy"] = Field(
+class BinaryCrossEntropyLossConfig(BaseModel):
+    object_type: Literal["binary_cross_entropy"] = Field(
         "binary_cross_entropy",
         description='Kind of loss. Must be "binary_cross_entropy"',
     )

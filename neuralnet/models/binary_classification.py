@@ -1,9 +1,8 @@
 from functools import cached_property
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, TypedDict, Literal
 from itertools import product
 from keras.models import Sequential, load_model
 from keras.metrics import (
-    Accuracy,
     TrueNegatives,
     TruePositives,
     FalseNegatives,
@@ -46,17 +45,17 @@ type LayerType = Annotated[
         | StronglyEntanglingQuantumLayer
         | HardwareEfficientQuantumLayer
     ),
-    Field(discriminator="name", description="Layer configuration field."),
+    Field(discriminator="object_type", description="Layer configuration field."),
 ]
 
 type OptimizerConfigType = Annotated[
     AdamOptimizer,
-    Field(discriminator="kind", description="Optimizer configuration field."),
+    Field(discriminator="object_type", description="Optimizer configuration field."),
 ]
 
 type LossConfigType = Annotated[
     BinaryCrossEntropyLossConfig,
-    Field(discriminator="kind", description="Loss configuration field."),
+    Field(discriminator="object_type", description="Loss configuration field."),
 ]
 
 type UpperThresholdLimit = Annotated[
@@ -105,6 +104,13 @@ class BinaryClassificationModelHistory(TypedDict):
 
 class BinaryClassificationModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    object_type: Literal["binary_classification_model"] = Field(
+        "binary_classification_model",
+        description="Name of the model. Should be 'binary_classification_model' for this class.",
+    )
+
+
     name: str = Field("keras_sequential", pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$")
     layers: list[LayerType] = Field(
         ..., min_items=1, description="List of sequential model layers."
@@ -188,11 +194,12 @@ class BinaryClassificationModel(BaseModel):
     def get_metrics(
         self,
     ) -> tuple[
-        Accuracy, TrueNegatives, TruePositives, FalseNegatives, FalsePositives, Recall
+        Literal['accuracy'], TrueNegatives, TruePositives, FalseNegatives, FalsePositives, Recall
     ]:
         """Return a tuple of metrics to be used in the model."""
+        # using the accuracy object did not work for some reason
         return (
-            Accuracy(),
+            'accuracy',
             TrueNegatives(thresholds=self.thresholds_list),
             TruePositives(thresholds=self.thresholds_list),
             FalseNegatives(thresholds=self.thresholds_list),
@@ -204,7 +211,7 @@ class BinaryClassificationModel(BaseModel):
         return [
             SP(
                 validation_data=val_dataset,
-                patience=25,
+                patience=self.patience,
                 verbose=self.verbose,
                 save_the_best=True,
             )
@@ -269,8 +276,6 @@ class BinaryClassificationModel(BaseModel):
     ):
         if isinstance(path, str):
             path = Path(path)
-        if path.exists():
-            raise FileExistsError(f"Path {path} already exists. Cannot save model.")
         if path.is_file():
             raise FileExistsError(f"Path {path} is a file. Cannot save model.")
         
@@ -310,8 +315,8 @@ class BinaryClassificationModel(BaseModel):
 type BinaryClassificationJobDatasetType = Annotated[
     RingerParquetDataset,
     Field(
-        description="Validation dataset as a RingerParquetDataset instance.",
-        discriminator="kind",
+        description="Dataset to be used.",
+        discriminator="object_type",
     ),
 ]
 
@@ -364,7 +369,7 @@ class BinaryClassificationJob(YamlBaseModel):
         logger.info(
             f"Starting job with model {self.model.name} on dataset at {self.dataset.dataset_dir}"
         )
-        self.output_path.mkdir(parents=True, exist_ok=False)
+        self.output_path.mkdir(parents=True, exist_ok=True)
         self.output_path.joinpath("config.json").write_text(
             self.model_dump_json(indent=4, exclude={'models', 'results'}), encoding="utf-8"
         )
@@ -474,4 +479,4 @@ def run_training(
     ],
 ):
     job = BinaryClassificationJob.from_yaml(config)
-    job.run()
+    job.submit()

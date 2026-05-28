@@ -4,7 +4,7 @@ from keras.optimizers import Adam
 
 
 class AdamOptimizer(BaseModel):
-    kind: Literal["adam"] = Field(
+    object_type: Literal["adam"] = Field(
         "adam", description='This optimizer name.'
     )
 

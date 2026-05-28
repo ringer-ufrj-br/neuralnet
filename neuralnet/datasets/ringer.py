@@ -92,13 +92,18 @@ class RingerParquetDataset(ParquetDataset):
             description="Fraction of the rings to be used for training. If 2, takes the first half of the rings for each layer. If 3, takes the first third of the rings, and so on.",
         ),
     ]
-    kind: Literal["ringer_dataset"] = Field(
-        "ringer_dataset",
-        description="Kind of the dataset. Should be 'ringer_dataset' for this class.",
+    object_type: Literal["ringer_parquet_dataset"] = Field(
+        "ringer_parquet_dataset",
+        description="Name of the dataset. Should be 'ringer_parquet_dataset' for this class.",
     )
     norm_strategy: Literal['l1'] | None = Field(
         None,
         description="Normalization strategy to apply to the rings. If None, no normalization is applied. If 'l1', each ring is divided by the sum of all rings for that sample.",
+    )
+    limit: int | None = Field(
+        None,
+        gt=0,
+        description="Limit the number of samples to use from the dataset. Useful for debugging and testing.",
     )
 
     _fold: int = PrivateAttr(0)
@@ -169,7 +174,7 @@ class RingerParquetDataset(ParquetDataset):
         ).then(
             rings_sum
         ).otherwise(
-            pl.lit(1.0, dtype=pl.type_of(rings_sum))
+            pl.lit(1.0, dtype=pl.dtype_of(rings_sum))
         )
         return l1_norm
 
@@ -179,6 +184,8 @@ class RingerParquetDataset(ParquetDataset):
         data_filter = self.get_data_filter()
         if data_filter is not None:
             data_df = data_df.filter(data_filter)
+        if self.limit is not None:
+            data_df = data_df.limit(self.limit)
         match self.norm_strategy:
             case 'l1':
                 l1_alias = self.l1_norm.alias("l1_norm")

@@ -20,14 +20,13 @@ from ..datasets import ParquetDataset
 from ..datasets.ringer import get_ring_slices_per_layer
 from ..submitit import ExecutorConfig
 from ..utils import pydantic_to_markdown_schema
-from ..pydantic import ConfigModel
 
 
 class DenseLayer(BaseModel):
     units: int
     activation: str
     kernel_initializer: str = Field(default="glorot_uniform")
-    name: Literal["dense"] = Field(default="dense", description='Layer name. Must be "dense"')
+    object_type: Literal["dense"] = Field(default="dense", description='Layer name. Must be "dense"')
     bias_initializer: str = Field(default="zeros")
 
     def get(self) -> Dense:

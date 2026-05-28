@@ -44,7 +44,7 @@ from neuralnet.models import quantum
     ],
 )
 def test_quantum_layer_config_get_returns_torch_module_wrapper(
-    class_name: str, kwargs: dict, name: str, monkeypatch: pytest.MonkeyPatch
+    class_name: str, kwargs: dict, name: str
 ):
     config_cls = getattr(quantum, class_name)
     config: quantum.QuantumLayer = config_cls(**kwargs)
