@@ -121,6 +121,7 @@ pandera==0.30.1
 pandocfilters==1.5.1
 parse==1.6.5
 parso==0.8.6
+pennylane==0.45.0
 pexpect==4.9.0
 pillow==12.1.1
 platformdirs==4.9.4
@@ -143,6 +144,7 @@ pyparser==1.0
 pyparsing==3.3.2
 pytest==9.0.2
 python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
 python-json-logger==4.1.0
 PyYAML==6.0.3
 pyzmq==27.1.0
