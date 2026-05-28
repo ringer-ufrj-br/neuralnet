@@ -7,7 +7,6 @@ from keras.metrics import (
     TruePositives,
     FalseNegatives,
     FalsePositives,
-    Recall,
 )
 from keras.callbacks import Callback, History
 from pydantic import BaseModel, Field, PrivateAttr, ConfigDict
@@ -19,6 +18,7 @@ from pathlib import Path
 import polars as pl
 import json
 import typer
+import keras
 
 from ..tensorflow.callbacks import SP
 from ..pydantic import YamlBaseModel
@@ -145,13 +145,6 @@ class BinaryClassificationModel(BaseModel):
     _keras: Sequential | None = PrivateAttr(default=None)
     _thresholds: npt.NDArray[np.floating] | None = PrivateAttr(default=None)
 
-    def _compile(self):
-        self._keras.compile(
-            optimizer=self.optimizer.get(),
-            loss=self.loss.get(),
-            metrics=list(self.get_metrics()),
-        )
-
     def model_post_init(self, __context):
         if self.lower_threshold >= self.upper_threshold:
             raise ValueError("Lower threshold must be lower than upper threshold")
@@ -171,7 +164,6 @@ class BinaryClassificationModel(BaseModel):
         self._thresholds = metric_thresholds
         
         self._keras = Sequential([layer.get() for layer in self.layers], name=self.name)
-        self._compile()
 
     @property
     def thresholds(self) -> npt.NDArray[np.floating]:
@@ -189,23 +181,6 @@ class BinaryClassificationModel(BaseModel):
 
     def set_keras(self, keras_model: Sequential):
         self._keras = keras_model
-        self._compile()
-
-    def get_metrics(
-        self,
-    ) -> tuple[
-        Literal['accuracy'], TrueNegatives, TruePositives, FalseNegatives, FalsePositives, Recall
-    ]:
-        """Return a tuple of metrics to be used in the model."""
-        # using the accuracy object did not work for some reason
-        return (
-            'accuracy',
-            TrueNegatives(thresholds=self.thresholds_list),
-            TruePositives(thresholds=self.thresholds_list),
-            FalseNegatives(thresholds=self.thresholds_list),
-            FalsePositives(thresholds=self.thresholds_list),
-            Recall(thresholds=self.thresholds_list),
-        )
 
     def get_callbacks(self, val_dataset: ModelDatasetType) -> tuple[SP]:
         return [
@@ -229,6 +204,37 @@ class BinaryClassificationModel(BaseModel):
                 new_history[key] = value
         return new_history
 
+    def _fit_compile(self):
+        compile_kwargs = {
+            'optimizer': self.optimizer.get(),
+            'loss': self.loss.get(),
+            'metrics': [
+                'accuracy',
+            ],
+        }
+        if keras.config.backend() == 'torch':
+            compile_kwargs['jit_compile'] = True
+        self._keras.compile(
+            **compile_kwargs
+        )
+    
+    def _eval_compile(self):
+        compile_kwargs = {
+            'optimizer': self.optimizer.get(),
+            'loss': self.loss.get(),
+            'metrics': [
+                TrueNegatives(thresholds=self.thresholds_list),
+                TruePositives(thresholds=self.thresholds_list),
+                FalseNegatives(thresholds=self.thresholds_list),
+                FalsePositives(thresholds=self.thresholds_list),
+                ],
+        }
+        if keras.config.backend() == 'torch':
+            compile_kwargs['jit_compile'] = True
+        self._keras.compile(
+            **compile_kwargs
+        )
+
     def fit(
         self,
         train_dataset: ModelDatasetType,
@@ -238,6 +244,7 @@ class BinaryClassificationModel(BaseModel):
         logger = logging.getLogger(self.logger_name)
         callbacks = callbacks + self.get_callbacks(val_dataset)
         start = datetime.now()
+        self._fit_compile()
         history = self._keras.fit(
             *train_dataset,
             validation_data=val_dataset,
@@ -258,7 +265,8 @@ class BinaryClassificationModel(BaseModel):
         return self._keras.predict(X)
 
     def evaluate(self, dataset: tuple[np.ndarray, np.ndarray]) -> ConfusionMatrix:
-        loss, _, tn, tp, fn, fp, _ = self._keras.evaluate(*dataset, verbose=self.verbose)
+        self._eval_compile()
+        loss, tn, tp, fn, fp = self._keras.evaluate(*dataset, verbose=self.verbose)
         results = ConfusionMatrix(
             loss=loss,
             tn=tn,
