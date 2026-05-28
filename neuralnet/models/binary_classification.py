@@ -89,6 +89,7 @@ type ModelDatasetType = Annotated[
     Field(description="Validation dataset as a tuple of (X_val, y_val)"),
 ]
 
+
 class BinaryClassificationModelHistory(TypedDict):
     loss: list[float]
     accuracy: list[float]
@@ -110,7 +111,6 @@ class BinaryClassificationModel(BaseModel):
         description="Name of the model. Should be 'binary_classification_model' for this class.",
     )
 
-
     name: str = Field("keras_sequential", pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$")
     layers: list[LayerType] = Field(
         ..., min_items=1, description="List of sequential model layers."
@@ -122,6 +122,10 @@ class BinaryClassificationModel(BaseModel):
     num_thresholds: NumThresholds
     lower_threshold: LowerThresholdLimit
     upper_threshold: UpperThresholdLimit
+    jit_compile: Literal["auto"] | bool = Field(
+        "auto",
+        description="Whether to use JIT compilation for the model.",
+    )
     # thresholds_strategy: Annotated[
     #     Literal['max_sp'],
     #     Field(
@@ -162,7 +166,7 @@ class BinaryClassificationModel(BaseModel):
         if self.from_logits:
             metric_thresholds = inverse_sigmoid(metric_thresholds)
         self._thresholds = metric_thresholds
-        
+
         self._keras = Sequential([layer.get() for layer in self.layers], name=self.name)
 
     @property
@@ -191,14 +195,14 @@ class BinaryClassificationModel(BaseModel):
                 save_the_best=True,
             )
         ]
-    
+
     def _clean_history(self, history: History) -> BinaryClassificationModelHistory:
         new_history = {}
         for key, value in history.history.items():
-            splitted_key = key.split('_')
+            splitted_key = key.split("_")
             try:
                 float(splitted_key[-1])
-                new_key = '_'.join(splitted_key[:-1])
+                new_key = "_".join(splitted_key[:-1])
                 new_history[new_key] = value
             except (ValueError, IndexError):
                 new_history[key] = value
@@ -206,34 +210,28 @@ class BinaryClassificationModel(BaseModel):
 
     def _fit_compile(self):
         compile_kwargs = {
-            'optimizer': self.optimizer.get(),
-            'loss': self.loss.get(),
-            'metrics': [
-                'accuracy',
+            "optimizer": self.optimizer.get(),
+            "loss": self.loss.get(),
+            "metrics": [
+                "accuracy",
             ],
+            "jit_compile": self.jit_compile,
         }
-        if keras.config.backend() == 'torch':
-            compile_kwargs['jit_compile'] = True
-        self._keras.compile(
-            **compile_kwargs
-        )
-    
+        self._keras.compile(**compile_kwargs)
+
     def _eval_compile(self):
         compile_kwargs = {
-            'optimizer': self.optimizer.get(),
-            'loss': self.loss.get(),
-            'metrics': [
+            "optimizer": self.optimizer.get(),
+            "loss": self.loss.get(),
+            "metrics": [
                 TrueNegatives(thresholds=self.thresholds_list),
                 TruePositives(thresholds=self.thresholds_list),
                 FalseNegatives(thresholds=self.thresholds_list),
                 FalsePositives(thresholds=self.thresholds_list),
-                ],
+            ],
+            "jit_compile": self.jit_compile,
         }
-        if keras.config.backend() == 'torch':
-            compile_kwargs['jit_compile'] = True
-        self._keras.compile(
-            **compile_kwargs
-        )
+        self._keras.compile(**compile_kwargs)
 
     def fit(
         self,
@@ -278,15 +276,12 @@ class BinaryClassificationModel(BaseModel):
 
         return results
 
-    def save(
-        self,
-        path: Path | str
-    ):
+    def save(self, path: Path | str):
         if isinstance(path, str):
             path = Path(path)
         if path.is_file():
             raise FileExistsError(f"Path {path} is a file. Cannot save model.")
-        
+
         path.mkdir(parents=True, exist_ok=False)
         self._keras.save(path.joinpath("model.keras"))
         with path.joinpath("config.json").open("w", encoding="utf-8") as f:
@@ -300,14 +295,16 @@ class BinaryClassificationModel(BaseModel):
             raise FileNotFoundError(f"Path {path} does not exist. Cannot load model.")
         if path.is_file():
             raise FileNotFoundError(f"Path {path} is a file. Cannot load model.")
-        
+
         with path.joinpath("config.json").open("r", encoding="utf-8") as f:
             config_dict = json.load(f)
             model = cls(**config_dict)
-        keras_model = load_model(path.joinpath("model.keras"), custom_objects=custom_objects, safe_mode=False)
+        keras_model = load_model(
+            path.joinpath("model.keras"), custom_objects=custom_objects, safe_mode=False
+        )
         model.set_keras(keras_model)
         return model
-    
+
     def new(self, **kwargs) -> "BinaryClassificationModel":
         """Create a new instance of the model with the same configuration but a new Keras model."""
         config_dict = self.model_dump()
@@ -328,6 +325,7 @@ type BinaryClassificationJobDatasetType = Annotated[
     ),
 ]
 
+
 class BinaryClassificationModelResultsDict(TypedDict):
     fold: int
     init: int
@@ -338,9 +336,7 @@ class BinaryClassificationModelResultsDict(TypedDict):
 
 
 class BinaryClassificationJob(YamlBaseModel):
-
-    model_config = ConfigDict(extra="forbid", frozen=True,
-                              arbitrary_types_allowed=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
     dataset: BinaryClassificationJobDatasetType
     model: BinaryClassificationModel
@@ -369,7 +365,7 @@ class BinaryClassificationJob(YamlBaseModel):
     )
     results: pl.DataFrame | None = Field(
         default=None,
-        description="DataFrame to store the results of the job. This field is populated after the job is run."
+        description="DataFrame to store the results of the job. This field is populated after the job is run.",
     )
 
     def submit(self):
@@ -379,7 +375,8 @@ class BinaryClassificationJob(YamlBaseModel):
         )
         self.output_path.mkdir(parents=True, exist_ok=True)
         self.output_path.joinpath("config.json").write_text(
-            self.model_dump_json(indent=4, exclude={'models', 'results'}), encoding="utf-8"
+            self.model_dump_json(indent=4, exclude={"models", "results"}),
+            encoding="utf-8",
         )
         n_folds = self.dataset.get_n_folds()
         logger.info(f"The dataset has {n_folds} folds.")
@@ -410,8 +407,8 @@ class BinaryClassificationJob(YamlBaseModel):
         train_numpy = self.dataset.train_numpy()
         val_numpy = self.dataset.val_numpy()
         results: BinaryClassificationModelResultsDict = {
-            'fold': fold,
-            'init': init,
+            "fold": fold,
+            "init": init,
         }
         model = self.model.new(name=f"{self.model.name}_fold_{fold}_init_{init}")
         results["fit"] = model.fit(train_numpy, val_numpy, callbacks=[])
@@ -425,7 +422,7 @@ class BinaryClassificationJob(YamlBaseModel):
         del test_numpy
         logger.info(f"Finished evaluating for fold {fold} and init {init}")
         output_path = self.output_path / f"fold_{fold}_init_{init}"
-        
+
         class NumpyEncoder(json.JSONEncoder):
             def default(self, obj):
                 if isinstance(obj, np.ndarray):
@@ -435,7 +432,7 @@ class BinaryClassificationJob(YamlBaseModel):
                 elif isinstance(obj, np.integer):
                     return int(obj)
                 return super().default(obj)
-        
+
         model.save(output_path)
         with output_path.joinpath("results.json").open("w", encoding="utf-8") as f:
             json.dump(results, f, indent=4, cls=NumpyEncoder)
@@ -449,21 +446,23 @@ class BinaryClassificationJob(YamlBaseModel):
         if path.is_file():
             raise FileNotFoundError(f"Path {path} is a file. Cannot load job.")
 
-        with path.joinpath("config.json").open('r') as f:
+        with path.joinpath("config.json").open("r") as f:
             job_config = json.load(f)
 
-        job_config['models'] = []
+        job_config["models"] = []
         results = []
 
         for model_dir in path.glob("fold_*_init_*"):
             if model_dir.is_file():
-                raise FileNotFoundError(f"Expected {model_dir} to be a directory containing the model and results, but it is a file.")
+                raise FileNotFoundError(
+                    f"Expected {model_dir} to be a directory containing the model and results, but it is a file."
+                )
             model = BinaryClassificationModel.load(model_dir)
             job_config["models"].append(model)
-            with model_dir.joinpath("results.json").open('r') as f:
+            with model_dir.joinpath("results.json").open("r") as f:
                 res = json.load(f)
                 results.append(res)
-        job_config['results'] = pl.from_dicts(results)
+        job_config["results"] = pl.from_dicts(results)
         job = cls(**job_config)
         return job
 
