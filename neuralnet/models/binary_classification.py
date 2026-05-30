@@ -463,6 +463,8 @@ class BinaryClassificationJob(YamlBaseModel):
                 res = json.load(f)
                 results.append(res)
         job_config["results"] = pl.from_dicts(results)
+        for field_to_unnest in ["fit", "train", "val", "test"]:
+            job_config["results"] = job_config["results"].unnest(field_to_unnest, separator=".")
         job = cls(**job_config)
         return job
 
