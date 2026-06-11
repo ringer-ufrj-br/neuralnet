@@ -29,58 +29,58 @@ def plot_metric_comparison(
 ) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
     fig = plt.figure(**fig_kwargs)
     grid_spec = GridSpec(9, 1, figure=fig)
-    ax = fig.add_subplot(grid_spec[:6, 0])
-    ref_ax = fig.add_subplot(grid_spec[6:, 0])
-    ax.grid(linestyle="--", alpha=0.1, color="k")
-    ax.set_ylabel(metric_label, fontsize="medium")
-    ax.set_xticks(xticks)
-    ax.set_title(title)
-    ax.tick_params(
+    top_ax = fig.add_subplot(grid_spec[:6, 0])
+    bottom_ax = fig.add_subplot(grid_spec[6:, 0])
+    top_ax.grid(linestyle="--", alpha=0.1, color="k")
+    top_ax.set_ylabel(metric_label, fontsize="medium")
+    top_ax.set_xticks(xticks)
+    top_ax.set_title(title)
+    top_ax.tick_params(
         axis="x",  # Apply to x and y axes
         which="both",  # Target major ticks
         # bottom=False,
         labelbottom=False,
     )
-    ax.tick_params(
+    top_ax.tick_params(
         axis="y",  # Apply to x and y axes
         which="both",  # Target major ticks
         # bottom=False,
         labelsize="small",
     )
 
-    ref_ax.grid(linestyle="--", alpha=0.1, color="k")
-    ref_ax.set_xticks(xticks)
-    ref_ax.tick_params(
+    bottom_ax.grid(linestyle="--", alpha=0.1, color="k")
+    bottom_ax.set_xticks(xticks)
+    bottom_ax.tick_params(
         axis="y",  # Apply to x and y axes
         which="both",  # Target major ticks
         # bottom=False,
         labelsize="small",
     )
-    ref_ax.set_xlabel("Fold", fontsize="medium")
-    ref_ax.tick_params(
+    bottom_ax.set_xlabel("Fold", fontsize="medium")
+    bottom_ax.tick_params(
         axis="x",  # Apply to x and y axes
         which="both",  # Target major ticks
         # bottom=False,
         labelsize="small",
     )
-    ref_ax.set_ylabel(f"Model/Ref ({to_plot[ref_name]['label']})", fontsize="medium")
-    ref_ax.axhline(1, color="k", linestyle="--", alpha=0.5)
+    bottom_ax.set_ylabel(rf"$\frac{{\mathrm{{Model}}}}{{{to_plot[ref_name]['label']}}}$", fontsize="medium", rotation=90)
+    bottom_ax.axhline(1, color="k", linestyle="--", alpha=0.5)
 
     if xlim is not None:
-        ax.set_xlim(*xlim)
-        ref_ax.set_xlim(*xlim)
+        top_ax.set_xlim(*xlim)
+        bottom_ax.set_xlim(*xlim)
 
     if scatter_ylim is not None:
-        ax.set_ylim(*scatter_ylim)
+        top_ax.set_ylim(*scatter_ylim)
 
     if ref_ratio_ylim is not None:
-        ref_ax.set_ylim(*ref_ratio_ylim)
+        bottom_ax.set_ylim(*ref_ratio_ylim)
 
     for plot_group in to_plot.values():
         x = plot_group["x"]
         y = plot_group["y"]
         yerr = plot_group.get("yerr", None)
-        ax.errorbar(
+        top_ax.errorbar(
             x,
             y,
             yerr=yerr,
@@ -104,7 +104,7 @@ def plot_metric_comparison(
         r_err = to_plot[ref_name]["yerr"]
         z = m / r
         z_err = np.abs(z) * np.sqrt((m_err / m) ** 2 + (r_err / r) ** 2)
-        ref_ax.errorbar(
+        bottom_ax.errorbar(
             x,
             z,
             yerr=z_err,
@@ -117,7 +117,7 @@ def plot_metric_comparison(
             alpha=0.7,
         )
         i += 1
-    ax.legend(fontsize="small")
-    # ref_ax.legend(fontsize='small')
+    top_ax.legend(fontsize="small")
+    # bottom_ax.legend(fontsize='small')
     fig.tight_layout()
-    return fig, ax, ref_ax
+    return fig, top_ax, bottom_ax
