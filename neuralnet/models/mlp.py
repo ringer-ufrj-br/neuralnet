@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 from collections import defaultdict
 from itertools import product
 from pathlib import Path

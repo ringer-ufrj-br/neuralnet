@@ -30,7 +30,6 @@ class ParquetDataset(BaseModel):
             return Path(self.dataset_dir) / table_name
         return Path(self.dataset_dir) / f"{table_name}.parquet"
 
-
 app = typer.Typer()
 
 

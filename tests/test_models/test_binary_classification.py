@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 from keras.models import Sequential
 
-from neuralnet.models.binary_classification import (
+from neuralnet.models.keras.binary_classification import (
     BinaryClassificationJob,
     BinaryClassificationModel,
 )

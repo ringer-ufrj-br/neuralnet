@@ -7,6 +7,10 @@ import numpy as np
 import numpy.typing as npt
 
 from . import ParquetDataset
+from .numpy import NumpyDataset
+from .polars import PolarsDataset
+from .torch import TorchDataset
+from .utils import KFoldDataset
 
 
 def get_ring_slices_per_layer(fraction: int) -> list[int]:
@@ -58,7 +62,7 @@ class Bin(BaseModel):
     )
 
 
-class RingerParquetDataset(ParquetDataset):
+class RingerParquetDataset(ParquetDataset, NumpyDataset, PolarsDataset, TorchDataset, KFoldDataset):
     model_config = ConfigDict(frozen=True)
 
     LABEL_COL: ClassVar[Literal["label"]] = "label"

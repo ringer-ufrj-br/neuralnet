@@ -1,0 +1,13 @@
+from typing import Protocol, runtime_checkable
+from torch.utils.data import DataLoader
+
+
+@runtime_checkable
+class TorchDataset(Protocol):
+    def train_numpy(self) -> DataLoader: ...
+
+    def val_numpy(self) -> DataLoader: ...
+
+    def test_numpy(self) -> DataLoader: ...
+
+    def predict_numpy(self) -> DataLoader: ...
