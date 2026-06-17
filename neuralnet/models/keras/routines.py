@@ -1,6 +1,6 @@
 from abc import abstractmethod, ABC
-from typing import Self, TypedDict, Any, NotRequired, Generator
-from pydantic import JsonValue
+from typing import Self, TypedDict, Any, NotRequired, Generator, Annotated
+from pydantic import JsonValue, Field
 from keras import Loss, Model, Optimizer, Metric, Layer
 from keras.models import load_model
 from keras.callbacks import Callback, History
@@ -14,6 +14,8 @@ import numpy as np
 import numpy.typing as npt
 from dataclasses import dataclass, asdict
 
+from ...datasets.numpy import NumpyDataset, NumpyDatasetReturnTypes
+
 from ...json import cast_to_json_value
 
 from ..keras_factories import (
@@ -25,7 +27,7 @@ from ..keras_factories import (
     KerasModelFactory,
     KerasSequentialModelFactory,
     StandardFitDict,
-    StandardEvaluationDict
+    StandardEvaluationDict,
 )
 
 
@@ -235,7 +237,7 @@ class KerasModel(ABC):
                 )
             with ZipFile(archive, "w", compression=ZIP_DEFLATED) as zip_file:
                 self._to_zip(zip_file, prefix)
-    
+
     @classmethod
     def from_factory(cls, factory: KerasModelFactory) -> Self:
         return cls(
@@ -275,3 +277,101 @@ class KerasSequentialModel(KerasModel):
             patience=factory.patience,
             layers=[layer.as_keras() for layer in factory.layers],
         )
+
+
+type ModelDatasetType = Annotated[
+    NumpyDataset,
+    Field(description="Validation dataset as a tuple of (X_val, y_val)"),
+]
+
+
+def safe_jit_compile(model: Model, **compile_kwargs) -> Model:
+    import keras
+
+    if keras.config.backend() == "torch":
+        try:
+            model.compile(jit_compile=True, **compile_kwargs)
+        except Exception as e:
+            logger = logging.getLogger("neuralnet")
+            logger.warning(f"Failed to compile model with JIT: {e}")
+            model.compile(jit_compile=False, **compile_kwargs)
+    else:
+        model.compile(**compile_kwargs)
+    return model
+
+
+def fit_routine(
+    model: Model,
+    dataset: ModelDatasetType,
+    loss: Loss,
+    optimizer: Optimizer,
+    metrics: list[Metric | str] | None = None,
+    callbacks: list[Callback] | None = None,
+    class_weight: dict[int, float] | None = None,
+    epochs: EpochsType = 100,
+    verbose: VerboseType = 1,
+) -> tuple[Model, StandardFitDict]:
+    logger = logging.getLogger("neuralnet")
+    if metrics is None:
+        metrics = []
+
+    if callbacks is None:
+        callbacks = []
+
+    start = datetime.now()
+    model = safe_jit_compile(model, loss=loss, optimizer=optimizer, metrics=metrics)
+    train_data = dataset.train_numpy()
+
+    if hasattr(dataset, "val_numpy"):
+        val_data = dataset.val_numpy()
+    else:
+        val_data = None
+
+    history: History = model.fit(
+        *train_data,
+        validation_data=val_data,
+        epochs=epochs,
+        verbose=verbose,
+        callbacks=callbacks,
+        shuffle=True,
+        class_weight=class_weight,
+    )
+    end = datetime.now()
+    logger.info(f"Finished training for model {model.name} with history: {history}")
+    logger.info(f"Training step: {end - start}")
+
+    history: dict[str, JsonValue] = cast_to_json_value(history.history)
+    history["start"] = start
+    history["end"] = end
+
+    return model, history
+
+
+def evaluation_routine(
+    model: Model,
+    dataset: NumpyDatasetReturnTypes,
+    loss: Loss,
+    optimizer: Optimizer,
+    metrics: list[Metric | str] | None = None,
+    callbacks: list[Callback] | None = None,
+    verbose: VerboseType = 1,
+) -> StandardEvaluationDict:
+    logger = logging.getLogger("neuralnet")
+    if metrics is None:
+        metrics = []
+
+    if callbacks is None:
+        callbacks = []
+
+    start = datetime.now()
+    model = safe_jit_compile(model, loss=loss, optimizer=optimizer, metrics=metrics)
+    data = dataset.val_numpy()
+    results = model.evaluate(*data, verbose=verbose)
+    results = cast_to_json_value(results)
+    end = datetime.now()
+    logger.info(f"Finished evaluating for model {model.name} with results: {results}")
+    logger.info(f"Evaluation step: {end - start}")
+    results["start"] = start
+    results["end"] = end
+
+    return results
