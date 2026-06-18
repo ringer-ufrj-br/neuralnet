@@ -3,6 +3,8 @@ import numpy as np
 import numpy.typing as npt
 from numbers import Real
 
+from .numpy import Numpy1DIntegerArray, Numpy1DFloatArray
+
 
 def sp_index(tpr: Real, fpr: Real) -> Real:
     """Calculate the SP index"""
@@ -22,29 +24,29 @@ class MaxSPDict(TypedDict):
 
 
 class EnhancedConfusionMatrixDict(TypedDict):
-    tn: list[int]
-    tp: list[int]
-    fn: list[int]
-    fp: list[int]
-    thresholds: list[float]
-    total: int
-    correct: int
-    incorrect: int
-    positives: int
-    negatives: int
-    accuracy: list[float]
-    tpr: list[float]
-    fpr: list[float]
-    sp: list[float]
-    auc: float
+    tn: Numpy1DIntegerArray
+    tp: Numpy1DIntegerArray
+    fn: Numpy1DIntegerArray
+    fp: Numpy1DIntegerArray
+    thresholds: Numpy1DFloatArray
+    total: np.integer
+    correct: np.integer
+    incorrect: np.integer
+    positives: np.integer
+    negatives: np.integer
+    accuracy: Numpy1DFloatArray
+    tpr: Numpy1DFloatArray
+    fpr: Numpy1DFloatArray
+    sp: Numpy1DFloatArray
+    auc: np.floating
     max_sp: MaxSPDict
 
 
 def enhanced_confusion_matrix(
-    tn: npt.NDArray[np.integer],
-    tp: npt.NDArray[np.integer],
-    fn: npt.NDArray[np.integer],
-    fp: npt.NDArray[np.integer],
+    tn: npt.NDArray[np.integer | np.floating],
+    tp: npt.NDArray[np.integer | np.floating],
+    fn: npt.NDArray[np.integer | np.floating],
+    fp: npt.NDArray[np.integer | np.floating],
     thresholds: npt.NDArray[np.floating],
 ) -> EnhancedConfusionMatrixDict:
     enhanced_cm = {
@@ -54,33 +56,41 @@ def enhanced_confusion_matrix(
         "fp": fp.tolist(),
         "thresholds": thresholds.tolist(),
     }
-    enhanced_cm["total"] = int((tn + tp + fn + fp)[0])
-    enhanced_cm["correct"] = int((tn + tp))
-    enhanced_cm["incorrect"] = int((fn + fp))
-    enhanced_cm["positives"] = int((tp + fn)[0])
-    enhanced_cm["negatives"] = int((tn + fp)[0])
+    argsort = np.argsort(thresholds)
+    thresholds = thresholds[argsort]
+    tn = tn[argsort].astype(int)
+    tp = tp[argsort].astype(int)
+    fn = fn[argsort].astype(int)
+    fp = fp[argsort].astype(int)
+    enhanced_cm["positives"] = tp[0] + fn[0]
+    enhanced_cm["negatives"] = tn[0] + fp[0]
+    enhanced_cm["total"] = enhanced_cm["positives"] + enhanced_cm["negatives"]
+    enhanced_cm["correct"] = tn + tp
+    enhanced_cm["incorrect"] = fn + fp
     acc = (tn + tp) / (tn + tp + fn + fp)
-    enhanced_cm["accuracy"] = acc.tolist()
+    enhanced_cm["accuracy"] = acc
     tpr = (tp) / (tp + fn)
-    enhanced_cm["tpr"] = tpr.tolist()
+    enhanced_cm["tpr"] = tpr
     fpr = (fp) / (fp + tn)
-    enhanced_cm["fpr"] = fpr.tolist()
+    enhanced_cm["fpr"] = fpr
     sp = sp_index(tpr, fpr)
-    enhanced_cm["sp"] = sp.tolist()
-    enhanced_cm["auc"] = float(np.trapz(tpr, fpr))
+    enhanced_cm["sp"] = sp
+    tpr_argsort = np.argsort(tpr)
+
+    enhanced_cm["auc"] = float(np.trapezoid(tpr[tpr_argsort], fpr[tpr_argsort]))
 
     sp_argmax = np.argmax(sp)
     max_sp_dict = {
-        "argmax": int(sp_argmax),
-        "threshold": float(thresholds[sp_argmax]),
-        "tn": int(tn[sp_argmax]),
-        "tp": int(tp[sp_argmax]),
-        "fn": int(fn[sp_argmax]),
-        "fp": int(fp[sp_argmax]),
-        "acc": float(acc[sp_argmax]),
-        "tpr": float(tpr[sp_argmax]),
-        "fpr": float(fpr[sp_argmax]),
-        "sp": float(sp[sp_argmax]),
+        "argmax": sp_argmax,
+        "threshold": thresholds[sp_argmax],
+        "tn": tn[sp_argmax],
+        "tp": tp[sp_argmax],
+        "fn": fn[sp_argmax],
+        "fp": fp[sp_argmax],
+        "acc": acc[sp_argmax],
+        "tpr": tpr[sp_argmax],
+        "fpr": fpr[sp_argmax],
+        "sp": sp[sp_argmax],
     }
     enhanced_cm["max_sp"] = max_sp_dict
     return enhanced_cm

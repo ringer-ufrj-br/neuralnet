@@ -87,7 +87,12 @@ class StandardEvaluationDict(TypedDict):
     end: datetime
 
 
-class StandardFitDict(TypedDict):
+class FitDict(TypedDict):
     loss: list[float]
+
+
+class FitRoutineDict(TypedDict):
+    train: FitDict
+    val: FitDict
     start: datetime
     end: datetime

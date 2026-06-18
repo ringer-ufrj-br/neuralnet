@@ -294,7 +294,7 @@ class RingerParquetDataset(ParquetDataset):
                     f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'."
                 )
         class_counts_df = df.select(self.LABEL_COL).group_by(self.LABEL_COL).len(name='count').collect()
-        class_counts = {int(row[self.LABEL_COL]): row['count'] for row in class_counts_df.iter_rows()}
+        class_counts = {int(row[self.LABEL_COL]): row['count'] for row in class_counts_df.iter_rows(named=True)}
         for class_ in self.CLASSES:
             if class_ not in class_counts:
                 class_counts[class_] = 0

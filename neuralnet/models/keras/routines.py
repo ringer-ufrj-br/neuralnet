@@ -12,7 +12,7 @@ from ...json import cast_to_json_value
 from .factories import (
     EpochsType,
     VerboseType,
-    StandardFitDict,
+    FitRoutineDict,
     StandardEvaluationDict,
 )
 
@@ -28,11 +28,13 @@ def safe_jit_compile(model: Model, **compile_kwargs) -> Model:
 
     if backend() == "torch":
         try:
-            model.compile(jit_compile=True, **compile_kwargs)
+            compile_kwargs["jit_compile"] = True
+            model.compile(**compile_kwargs)
         except Exception as e:
+            compile_kwargs["jit_compile"] = False
             logger = logging.getLogger("neuralnet")
             logger.warning(f"Failed to compile model with JIT: {e}")
-            model.compile(jit_compile=False, **compile_kwargs)
+            model.compile(**compile_kwargs)
     else:
         model.compile(**compile_kwargs)
     return model
@@ -40,7 +42,8 @@ def safe_jit_compile(model: Model, **compile_kwargs) -> Model:
 
 def fit_routine(
     model: Model,
-    dataset: ModelDatasetType,
+    train_data: NumpyDatasetReturnTypes,
+    val_data: NumpyDatasetReturnTypes | None,
     loss: Loss,
     optimizer: Optimizer,
     metrics: list[Metric | str] | None = None,
@@ -48,7 +51,8 @@ def fit_routine(
     class_weight: dict[int, float] | None = None,
     epochs: EpochsType = 100,
     verbose: VerboseType = 1,
-) -> tuple[Model, StandardFitDict]:
+    batch_size: int | None = None,
+) -> tuple[Model, FitRoutineDict]:
     logger = logging.getLogger("neuralnet")
     if metrics is None:
         metrics = []
@@ -58,36 +62,41 @@ def fit_routine(
 
     start = datetime.now()
     model = safe_jit_compile(model, loss=loss, optimizer=optimizer, metrics=metrics)
-    train_data = dataset.train_numpy()
-
-    if hasattr(dataset, "val_numpy"):
-        val_data = dataset.val_numpy()
-    else:
-        val_data = None
 
     history: History = model.fit(
         *train_data,
         validation_data=val_data,
         epochs=epochs,
         verbose=verbose,
-        callbacks=callbacks,
+        # callbacks=callbacks,
         shuffle=True,
-        class_weight=class_weight,
+        batch_size=batch_size,
+        # class_weight=class_weight,
     )
     end = datetime.now()
     logger.info(f"Finished training for model {model.name} with history: {history}")
     logger.info(f"Training step: {end - start}")
 
     history: dict[str, JsonValue] = cast_to_json_value(history.history)
-    history["start"] = start
-    history["end"] = end
+    new_history = {
+        "start": start,
+        "end": end,
+        "train": {},
+        "val": {},
+    }
+    for key in history.keys():
+        if key.startswith("val_"):
+            new_key = key.replace("val_", "")
+            new_history["val"][new_key] = history[key]
+        else:
+            new_history["train"][key] = history[key]
 
-    return model, history
+    return model, new_history
 
 
 def evaluation_routine(
     model: Model,
-    dataset: NumpyDatasetReturnTypes,
+    data: NumpyDatasetReturnTypes,
     loss: Loss,
     optimizer: Optimizer,
     metrics: list[Metric | str] | None = None,
@@ -103,8 +112,7 @@ def evaluation_routine(
 
     start = datetime.now()
     model = safe_jit_compile(model, loss=loss, optimizer=optimizer, metrics=metrics)
-    data = dataset.val_numpy()
-    results = model.evaluate(*data, verbose=verbose)
+    results = model.evaluate(*data, verbose=verbose, return_dict=True)
     results = cast_to_json_value(results)
     end = datetime.now()
     logger.info(f"Finished evaluating for model {model.name} with results: {results}")

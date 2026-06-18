@@ -39,7 +39,7 @@ from ..metrics import enhanced_confusion_matrix, EnhancedConfusionMatrixDict
 from ..models.keras.factories import (
     EpochsType,
     VerboseType,
-    StandardFitDict,
+    FitRoutineDict,
     KerasSequentialModelFactory,
     LossType,
     OptimizerType,
@@ -47,6 +47,7 @@ from ..models.keras.factories import (
 from ..utils import traverse
 from ..polars import PolarsExpression
 from ..datasets import DirectoryType
+from ..json import cast_to_json_value
 
 type RingerTrainingJobDatasetType = Annotated[
     RingerParquetDataset,
@@ -65,13 +66,18 @@ type FromLogitsType = Annotated[
 ]
 
 
-class FitDict(StandardFitDict):
+class FitMetricsDict(TypedDict):
     loss: list[float]
     accuracy: list[float]
-    max_sp_val: list[float]
-    max_sp_pd_val: list[float]
-    max_sp_fa_val: list[float]
-    max_sp_threshold_val: list[float]
+    val_max_sp: list[float]
+    val_max_sp_pd: list[float]
+    val_max_sp_fa: list[float]
+    val_max_sp_threshold: list[float]
+
+
+class FitDict(FitRoutineDict):
+    train: FitMetricsDict
+    val: FitMetricsDict
 
 
 class EvaluationDict(EnhancedConfusionMatrixDict):
@@ -118,6 +124,7 @@ type EtaBinIntervalValue = Annotated[
     ),
 ]
 
+
 class RingerCommitteeKerasTrainingJob(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -156,6 +163,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         description="Whether to balance class weights during training. If True, the class weights will be set inversely proportional to the class frequencies.",
     )
     inits: Annotated[int, Field(description="Number of initializations")] = 5
+    patience: PatienceType
 
     # Threshold Fit
     num_thresholds: int = Field(
@@ -279,11 +287,11 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         executor = self.executor_config.get_executor()
         members = {
             "id": [],
-            "et_bin.lower": [],
-            "et_bin.upper": [],
+            "et_bin.low": [],
+            "et_bin.high": [],
             "et_bin.closed": [],
-            "eta_bin.lower": [],
-            "eta_bin.upper": [],
+            "eta_bin.low": [],
+            "eta_bin.high": [],
             "eta_bin.closed": [],
             "fold": [],
             "init": [],
@@ -305,20 +313,26 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
                     f"{member_id}: Submitting training for Et bin {et_bin} and Eta bin {eta_bin}, fold {fold} and init {init}"
                 )
                 submitted_job = executor.submit(
-                    self._run_training, member_id, et_bin, eta_bin, fold, init
+                    self._run_training,
+                    member_id,
+                    et_bin.model_dump(),
+                    eta_bin.model_dump(),
+                    fold,
+                    init,
                 )
                 submitted_jobs.append(submitted_job)
                 members["id"].append(member_id)
                 members["fold"].append(fold)
                 members["init"].append(init)
-                members["et_bin.lower"].append(et_bin.lower)
-                members["et_bin.upper"].append(et_bin.upper)
+                members["et_bin.low"].append(et_bin.low)
+                members["et_bin.high"].append(et_bin.high)
                 members["et_bin.closed"].append(et_bin.closed)
-                members["eta_bin.lower"].append(eta_bin.lower)
-                members["eta_bin.upper"].append(eta_bin.upper)
+                members["eta_bin.low"].append(eta_bin.low)
+                members["eta_bin.high"].append(eta_bin.high)
                 members["eta_bin.closed"].append(eta_bin.closed)
 
         dependent_executor = self.executor_config.get_executor()
+        
         dependency_string = ":".join(str(job.job_id) for job in submitted_jobs)
         logger.info(
             f"Submitting dependent job with dependency on jobs: {dependency_string}"
@@ -334,7 +348,6 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         self, member_id: int, et_bin: dict, eta_bin: dict, fold: int, init: int
     ):
         from neuralnet.models.keras.routines import fit_routine, evaluation_routine
-        from neuralnet.tensorflow.callbacks import SP
         from keras import Model
 
         logger = logging.getLogger(self.logger_name)
@@ -379,7 +392,9 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
             logger.warning("Dry run enabled, running one epoch.")
             epochs = 1
         else:
-            epochs = model_factory.epochs
+            epochs = self.epochs
+
+        from neuralnet.callbacks.keras import SP
 
         sp_callback = SP(
             validation_data=val_numpy,
@@ -387,18 +402,22 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
             verbose=self.verbose,
             save_the_best=True,
         )
-        callbacks = [c.as_keras() for c in model_factory.callbacks] + [sp_callback]
+        callbacks = [sp_callback]
+        train_data = dataset.train_numpy()
+        val_data = dataset.val_numpy()
 
-        results["fit"] = fit_routine(
+        model, results["fit"] = fit_routine(
             model=model,
-            dataset=dataset,
+            train_data=train_data,
+            val_data=val_data,
             loss=self.loss.as_keras(),
             optimizer=self.optimizer.as_keras(),
             metrics=["accuracy"],
             callbacks=callbacks,
             epochs=epochs,
             verbose=self.verbose,
-            class_weights=class_weights,
+            batch_size=self.batch_size,
+            # class_weight=class_weights,
         )
         logger.info(f"Finished training for fold {fold} and init {init}")
 
@@ -407,9 +426,9 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
 
         eval_dict = evaluation_routine(
             model=model,
-            dataset=train_numpy,
-            loss=model_factory.loss.as_keras(),
-            optimizer=model_factory.optimizer.as_keras(),
+            data=train_numpy,
+            loss=self.loss.as_keras(),
+            optimizer=self.optimizer.as_keras(),
             metrics=self.get_metrics(),
         )
         results["train"] = self.process_eval_dict(
@@ -419,9 +438,9 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
 
         eval_dict = evaluation_routine(
             model=model,
-            dataset=val_numpy,
-            loss=model_factory.loss.as_keras(),
-            optimizer=model_factory.optimizer.as_keras(),
+            data=val_numpy,
+            loss=self.loss.as_keras(),
+            optimizer=self.optimizer.as_keras(),
             metrics=self.get_metrics(),
         )
         results["val"] = self.process_eval_dict(
@@ -433,9 +452,9 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
             test_numpy = dataset.test_numpy()
             eval_dict = evaluation_routine(
                 model=model,
-                dataset=test_numpy,
-                loss=model_factory.loss.as_keras(),
-                optimizer=model_factory.optimizer.as_keras(),
+                data=test_numpy,
+                loss=self.loss.as_keras(),
+                optimizer=self.optimizer.as_keras(),
                 metrics=self.get_metrics(),
             )
             results["test"] = self.process_eval_dict(
@@ -446,7 +465,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         logger.info(f"Finished evaluating for fold {fold} and init {init}")
         results_path = output_dir / "results.json"
         with results_path.open("w", encoding="utf-8") as f:
-            json.dump(results, f, indent=4)
+            json.dump(cast_to_json_value(results), f, indent=4)
 
         zip_path = output_dir / "results.json.zip"
         with ZipFile(zip_path, "w", ZIP_DEFLATED) as zipf:
@@ -495,7 +514,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
             tp=np.array(eval_dict.pop("true_positives")),
             fn=np.array(eval_dict.pop("false_negatives")),
             fp=np.array(eval_dict.pop("false_positives")),
-            thresholds=self.thresholds_list,
+            thresholds=self.thresholds,
         )
         if self.balance_class_weights:
             match data_category:
@@ -508,21 +527,21 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
                 case _:
                     raise ValueError(f"Unknown data_category: {data_category}")
             weighted_eval_dict = {
-                "true_negatives": np.array(eval_dict["true_negatives"])
+                "tn": np.array(enhanced_cm_dict["tn"])
                 * class_weights[0],
-                "true_positives": np.array(eval_dict["true_positives"])
+                "tp": np.array(enhanced_cm_dict["tp"])
                 * class_weights[1],
-                "false_negatives": np.array(eval_dict["false_negatives"])
+                "fn": np.array(enhanced_cm_dict["fn"])
+                * class_weights[1],
+                "fp": np.array(enhanced_cm_dict["fp"])
                 * class_weights[0],
-                "false_positives": np.array(eval_dict["false_positives"])
-                * class_weights[1],
             }
             weighted_enhanced_cm_dict = enhanced_confusion_matrix(
-                tn=weighted_eval_dict["true_negatives"],
-                tp=weighted_eval_dict["true_positives"],
-                fn=weighted_eval_dict["false_negatives"],
-                fp=weighted_eval_dict["false_positives"],
-                thresholds=self.thresholds_list,
+                tn=weighted_eval_dict["tn"],
+                tp=weighted_eval_dict["tp"],
+                fn=weighted_eval_dict["fn"],
+                fp=weighted_eval_dict["fp"],
+                thresholds=self.thresholds,
             )
             enhanced_cm_dict["weighted"] = weighted_enhanced_cm_dict
         return enhanced_cm_dict
@@ -544,13 +563,14 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         all_model_results = pl.DataFrame(all_models_results)
         all_model_results.write_parquet(self.all_models_results_path)
 
+        bins_cols = ["et_bin.low", "et_bin.high", "et_bin.closed", "eta_bin.low", "eta_bin.high", "eta_bin.closed"]
         best_init_results = all_model_results.filter(
             pl.col(self.best_init.key)
-            == pl.col(self.best_init.key).max().over(("et_bin", "eta_bin", "fold"))
+            == pl.col(self.best_init.key).max().over((*bins_cols, "fold"))
         )
         selected_models = best_init_results.filter(
             pl.col(self.best_fold.key)
-            == pl.col(self.best_fold.key).max().over(("et_bin", "eta_bin"))
+            == pl.col(self.best_fold.key).max().over(bins_cols)
         )
         selected_models.write_parquet(self.selected_models_path)
 
@@ -644,9 +664,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
 
         return model, results
 
-    @validate_call(
-        config=ConfigDict(arbitrary_types_allowed=True)
-    )
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def get_committee_model(
         self,
         et_col: PolarsExpression | None = None,
