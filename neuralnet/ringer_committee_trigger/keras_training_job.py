@@ -203,23 +203,23 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         default_factory=SelectionCriteria,
         description="Criterion to select the best model initialization. Must be a key in the fit dictionary of the training results.",
     )
-    best_fold: str = Field(
+    best_fold: SelectionCriteria = Field(
         default_factory=SelectionCriteria,
         description="Criterion to select the best fold. Must be a key in the fit dictionary of the training results.",
     )
 
     # Private
-    _thresholds: npt.NDArray[np.floating] | None = PrivateAttr(default=None)
+    _thresholds: list[float] | None = PrivateAttr(default=None)
 
     @property
-    def thresholds(self) -> npt.NDArray[np.floating]:
+    def thresholds(self) -> list[float]:
         if self._thresholds is None:
             raise ValueError("Thresholds not initialized")
         return self._thresholds
 
     @cached_property
-    def thresholds_list(self) -> list[float]:
-        return self.thresholds.tolist()
+    def thresholds_array(self) -> npt.NDArray[np.floating]:
+        return np.array(self.thresholds)
 
     @cached_property
     def config_path(self) -> Path:
@@ -247,6 +247,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         if self.from_logits:
             self._thresholds = inverse_sigmoid(self._thresholds)
 
+        self._thresholds = self._thresholds.tolist()  # Convert to list for JSON serialization
         self.et_bins.sort()
         self.eta_bins.sort()
 
@@ -332,14 +333,18 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
                 members["eta_bin.closed"].append(eta_bin.closed)
 
         dependent_executor = self.executor_config.get_executor()
-        
-        dependency_string = ":".join(str(job.job_id) for job in submitted_jobs)
-        logger.info(
-            f"Submitting dependent job with dependency on jobs: {dependency_string}"
-        )
-        dependent_executor.update_parameters(
-            slurm_additional_parameters={"dependency": f"afterok:{dependency_string}"}
-        )
+        from submitit import AutoExecutor
+
+        if isinstance(dependent_executor, AutoExecutor):
+            dependency_string = ":".join(str(job.job_id) for job in submitted_jobs)
+            logger.info(
+                f"Submitting dependent job with dependency on jobs: {dependency_string}"
+            )
+            dependent_executor.update_parameters(
+                slurm_additional_parameters={
+                    "dependency": f"afterok:{dependency_string}"
+                }
+            )
         dependent_executor.submit(self.post_training, members)
 
         logger.info("All jobs submitted.")
@@ -473,6 +478,11 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
 
         logger.info(f"Saved results to {output_dir}")
 
+        del model
+        from keras.backend import clear_session
+
+        clear_session()
+
     def get_metrics(self):
         from keras.metrics import (
             TrueNegatives,
@@ -484,19 +494,19 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         metrics = [
             TrueNegatives(
                 name="true_negatives",
-                thresholds=self.thresholds_list,
+                thresholds=self.thresholds,
             ),
             TruePositives(
                 name="true_positives",
-                thresholds=self.thresholds_list,
+                thresholds=self.thresholds,
             ),
             FalseNegatives(
                 name="false_negatives",
-                thresholds=self.thresholds_list,
+                thresholds=self.thresholds,
             ),
             FalsePositives(
                 name="false_positives",
-                thresholds=self.thresholds_list,
+                thresholds=self.thresholds,
             ),
         ]
         return metrics
@@ -514,7 +524,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
             tp=np.array(eval_dict.pop("true_positives")),
             fn=np.array(eval_dict.pop("false_negatives")),
             fp=np.array(eval_dict.pop("false_positives")),
-            thresholds=self.thresholds,
+            thresholds=self.thresholds_array,
         )
         if self.balance_class_weights:
             match data_category:
@@ -527,21 +537,17 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
                 case _:
                     raise ValueError(f"Unknown data_category: {data_category}")
             weighted_eval_dict = {
-                "tn": np.array(enhanced_cm_dict["tn"])
-                * class_weights[0],
-                "tp": np.array(enhanced_cm_dict["tp"])
-                * class_weights[1],
-                "fn": np.array(enhanced_cm_dict["fn"])
-                * class_weights[1],
-                "fp": np.array(enhanced_cm_dict["fp"])
-                * class_weights[0],
+                "tn": np.array(enhanced_cm_dict["tn"]) * class_weights[0],
+                "tp": np.array(enhanced_cm_dict["tp"]) * class_weights[1],
+                "fn": np.array(enhanced_cm_dict["fn"]) * class_weights[1],
+                "fp": np.array(enhanced_cm_dict["fp"]) * class_weights[0],
             }
             weighted_enhanced_cm_dict = enhanced_confusion_matrix(
                 tn=weighted_eval_dict["tn"],
                 tp=weighted_eval_dict["tp"],
                 fn=weighted_eval_dict["fn"],
                 fp=weighted_eval_dict["fp"],
-                thresholds=self.thresholds,
+                thresholds=self.thresholds_array,
             )
             enhanced_cm_dict["weighted"] = weighted_enhanced_cm_dict
         return enhanced_cm_dict
@@ -557,14 +563,21 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
                 with zipf.open("results.json") as f:
                     member_results = json.load(f)
 
-            for key, value in traverse(member_results):
-                all_models_results[key].append({value})
+            for key, value in traverse(member_results, include_sequences=False):
+                all_models_results[key].append(value)
 
-        all_model_results = pl.DataFrame(all_models_results)
-        all_model_results.write_parquet(self.all_models_results_path)
+        all_model_results_df = pl.DataFrame(all_models_results)
+        all_model_results_df.write_parquet(self.all_models_results_path)
 
-        bins_cols = ["et_bin.low", "et_bin.high", "et_bin.closed", "eta_bin.low", "eta_bin.high", "eta_bin.closed"]
-        best_init_results = all_model_results.filter(
+        bins_cols = [
+            "et_bin.low",
+            "et_bin.high",
+            "et_bin.closed",
+            "eta_bin.low",
+            "eta_bin.high",
+            "eta_bin.closed",
+        ]
+        best_init_results = all_model_results_df.filter(
             pl.col(self.best_init.key)
             == pl.col(self.best_init.key).max().over((*bins_cols, "fold"))
         )
@@ -612,11 +625,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
 
     @classmethod
     def load(cls, path: Path | str) -> Self:
-        if not cls.validate_saved_directory(path):
-            raise ValueError(
-                f"Directory {path} is not a valid saved {cls.__name__} directory."
-            )
-
+        cls.validate_saved_directory(path)
         path = Path(path)
         config_path = path / "config.json"
         with config_path.open("r", encoding="utf-8") as f:
@@ -646,11 +655,12 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         member_output_dir = self.get_member_output_dir(member_id)
 
         from keras.models import load_model
+        from keras import Model
 
         model_path = member_output_dir / "model.keras"
         if not model_path.exists():
             raise FileNotFoundError(f"Model file not found at {model_path}")
-        model = load_model(model_path)
+        model: Model = load_model(model_path)
 
         if not with_results:
             return model

@@ -156,7 +156,7 @@ def pydantic_to_markdown_schema(model_class: type[BaseModel], indent: int = 0) -
     return "\n".join(lines)
 
 def traverse(
-    d: Mapping[Any, Any] | Iterable[Any], parent_key: str = ""
+    d: Mapping[Any, Any] | Iterable[Any], parent_key: str = "", include_sequences: bool = False
 ) -> Iterator[tuple[str, Any]]:
     """
     Recursively traverse a mapping or iterable of objects and yield key-value pairs.
@@ -167,23 +167,30 @@ def traverse(
         The mapping or iterable to traverse.
     parent_key : str
         The base key to prepend to each key in the nested mappings.
+    include_sequences: bool
+        If True, the function will also traverse sequences (like lists and tuples).
+        If False, sequences will be treated as leaf nodes and not traversed.
 
     Yields
     ------
     tuple[str, Any]
         A tuple containing the full key path and its corresponding value.
     """
+    if include_sequences:
+        traverse_types = (Mapping, Sequence)
+    else:
+        traverse_types = (Mapping,)
     if isinstance(d, Mapping):
         for k, v in d.items():
             new_key = f"{parent_key}.{k}" if parent_key else k
-            if isinstance(v, (Mapping, Iterable)) and not isinstance(v, (str, bytes)):
+            if isinstance(v, traverse_types) and not isinstance(v, (str, bytes)):
                 yield from traverse(v, new_key)
             else:
                 yield new_key, v
     elif isinstance(d, Iterable) and not isinstance(d, (str, bytes)):
         for i, item in enumerate(d):
             item_key = f"{parent_key}.{i}" if parent_key else str(i)
-            if isinstance(item, (Mapping, Iterable)) and not isinstance(item, (str, bytes)):
+            if isinstance(item, traverse_types) and not isinstance(item, (str, bytes)):
                 yield from traverse(item, item_key)
             else:
                 yield item_key, item
