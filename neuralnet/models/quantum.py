@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Annotated, Literal
 from abc import ABC, abstractmethod
 from pydantic import BaseModel, Field, PrivateAttr
 from keras.layers import TorchModuleWrapper
@@ -24,21 +24,27 @@ class QuantumLayer(BaseModel, ABC):
     n_layers: int = Field(
         2, gt=0, description="Number of trainable layers in the circuit."
     )
-    device_name: Literal["default.qubit", "lightning.qubit"] = Field(
-        "default.qubit", description="PennyLane device name used to build the circuit."
-    )
-    shots: int | None = Field(
-        default=None,
-        gt=0,
-        description="Number of shots used by the PennyLane device. Use None for analytic execution.",
-    )
-    name: str | None = Field(
-        default=None, description="Optional Keras layer name for the wrapped circuit."
-    )
-    output_qubits: int | tuple[int, ...] | None = Field(
-        default=None,
-        description="Number of qubits or indices of qubits whose expectation values are returned as output. If None, defaults to all qubits.",
-    )
+    device_name: Annotated[
+        Literal["default.qubit", "lightning.qubit"],
+        Field(description="PennyLane device name used to build the circuit."),
+    ] = "default.qubit"
+    shots: Annotated[
+        int | None,
+        Field(
+            gt=0,
+            description="Number of shots used by the PennyLane device. Use None for analytic execution.",
+        ),
+    ] = None
+    name: Annotated[
+        str | None,
+        Field(None, description="Optional Keras layer name for the wrapped circuit."),
+    ] = None
+    output_qubits: Annotated[
+        int | tuple[int, ...] | None,
+        Field(
+            description="Number of qubits or indices of qubits whose expectation values are returned as output. If None, defaults to all qubits.",
+        ),
+    ] = None
 
     _device = PrivateAttr(None)
     _circuit_node = PrivateAttr(None)
@@ -61,7 +67,7 @@ class QuantumLayer(BaseModel, ABC):
             raise ValueError(
                 f"output_qubits must be an int, a tuple of ints, or None. Got {type(self.output_qubits).__name__}."
             )
-    
+
     def _build_node(self):
         self._device = qml.device(
             self.device_name,

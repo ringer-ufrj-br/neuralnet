@@ -4,22 +4,18 @@ from pydantic import Field, BaseModel, PrivateAttr
 type DiffMethodType = Annotated[
     Literal["best", "backprop", "adjoint", "parameter-shift", "finite-diff", "spsa"],
     Field(
-        "backprop",
         description="PennyLane differentiation method used by the quantum node.",
     ),
 ]
 
 type NameType = Annotated[
     str | None,
-    Field(
-        default=None, description="Optional Keras layer name for the wrapped circuit."
-    ),
+    Field(None, description="Optional Keras layer name for the wrapped circuit."),
 ]
 
 type DeviceNameType = Annotated[
     Literal["default.qubit", "lightning.qubit"],
     Field(
-        default="default.qubit",
         description="PennyLane device name used to build the circuit.",
     ),
 ]
@@ -27,7 +23,6 @@ type DeviceNameType = Annotated[
 type OutputQubitsType = Annotated[
     int | tuple[int, ...] | None,
     Field(
-        default=None,
         description="Number of qubits or indices of qubits whose expectation values are returned as output. If None, defaults to all qubits.",
     ),
 ]
@@ -35,7 +30,6 @@ type OutputQubitsType = Annotated[
 type ShotsType = Annotated[
     int | None,
     Field(
-        default=None,
         gt=0,
         description="Number of shots used by the PennyLane device. Use None for analytic execution.",
     ),
@@ -49,7 +43,6 @@ type NQubitsType = Annotated[
 type AngleEmbeddingRotationType = Annotated[
     Literal["X", "Y", "Z"],
     Field(
-        default="X",
         description="Rotation type used in the angle embedding. Can be 'X', 'Y', or 'Z'.",
     ),
 ]
@@ -65,7 +58,7 @@ class AngleEmbedding(BaseModel):
         description='Quantum layer name. Uses "qml.AngleEmbedding".',
     )
 
-    rotation: AngleEmbeddingRotationType
+    rotation: AngleEmbeddingRotationType = "X"
 
     def as_pennylane(self):
         import pennylane as qml
@@ -81,7 +74,6 @@ class AngleEmbedding(BaseModel):
 type EmbedderType = Annotated[
     AngleEmbedding,
     Field(
-        default_factory=AngleEmbedding,
         discriminator="object_type",
         description="PennyLane embedding layer used to encode the input data into the quantum circuit.",
     ),
@@ -89,7 +81,7 @@ type EmbedderType = Annotated[
 
 type NLayersType = Annotated[
     int,
-    Field(2, gt=0, description="Number of layers used by the quantum circuit ansatz."),
+    Field(gt=0, description="Number of layers used by the quantum circuit ansatz."),
 ]
 
 
@@ -99,7 +91,7 @@ class BasicEntanglerAnsatz(BaseModel):
         description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
     )
 
-    n_layers: NLayersType
+    n_layers: NLayersType = 2
 
     _n_wires: int | None = PrivateAttr(None)
 
@@ -213,7 +205,6 @@ class HardwareEfficientAnsatz(BaseModel):
 type AnsatzType = Annotated[
     BasicEntanglerAnsatz | StronglyEntanglingAnsatz | HardwareEfficientAnsatz,
     Field(
-        default_factory=BasicEntanglerAnsatz,
         discriminator="object_type",
         description="PennyLane ansatz layer used to build the quantum circuit.",
     ),
@@ -238,7 +229,6 @@ class PauliZ(BaseModel):
 type UnaryOperatorType = Annotated[
     PauliZ,
     Field(
-        default_factory=PauliZ,
         discriminator="object_type",
         description="A callable that takes a single argument and returns a transformed version of it. Used to apply unary operations to the quantum circuit outputs before returning them.",
     ),
@@ -251,15 +241,17 @@ class QuantumLayerFactory(BaseModel):
         description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
     )
 
-    embedder: EmbedderType
-    ansatz: AnsatzType
-    unary_operator: UnaryOperatorType
+    embedder: EmbedderType = Field(default_factory=AngleEmbedding)
+    ansatz: AnsatzType = Field(default_factory=BasicEntanglerAnsatz)
+    unary_operator: UnaryOperatorType = Field(
+        default_factory=PauliZ,
+    )
     n_qubits: NQubitsType
     weight_shapes: WeightShapesDict
-    device_name: DeviceNameType
-    diff_method: DiffMethodType
-    shots: ShotsType
-    output_qubits: OutputQubitsType
+    device_name: DeviceNameType = "default.qubit"
+    diff_method: DiffMethodType = "backprop"
+    shots: ShotsType = None
+    output_qubits: OutputQubitsType = None
 
     def _validate_output_qubits(self):
         if self.output_qubits is None:

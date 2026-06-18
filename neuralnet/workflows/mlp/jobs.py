@@ -18,8 +18,8 @@ import numpy.typing as npt
 from functools import cached_property
 import json
 from zipfile import ZipFile, ZIP_DEFLATED
-from ..submitit import ExecutorConfig
-from ..logging import LoggerName
+from ...submitit import ExecutorConfig
+from ...logging import LoggerName
 from .dataset import (
     RingerParquetDataset,
     BatchSizeType,
@@ -34,20 +34,20 @@ from .dataset import (
     EtaColType,
     Bin,
 )
-from ..numpy import inverse_sigmoid
-from ..metrics import enhanced_confusion_matrix, EnhancedConfusionMatrixDict
-from ..models.keras.factories import (
+from ...numpy import inverse_sigmoid
+from ...metrics import enhanced_confusion_matrix, EnhancedConfusionMatrixDict
+from ...models.keras.factories import (
     EpochsType,
     VerboseType,
     FitRoutineDict,
-    KerasSequentialModelFactory,
     LossType,
     OptimizerType,
 )
-from ..utils import traverse
-from ..polars import PolarsExpression
-from ..datasets import DirectoryType
-from ..json import cast_to_json_value
+from ...layers.dense import MLPFactory
+from ...utils import traverse
+from ...polars import PolarsExpression
+from ...datasets import DirectoryType
+from ...json import cast_to_json_value
 
 type RingerTrainingJobDatasetType = Annotated[
     RingerParquetDataset,
@@ -60,7 +60,6 @@ type RingerTrainingJobDatasetType = Annotated[
 type FromLogitsType = Annotated[
     bool,
     Field(
-        False,
         description="Whether the model output to consider is logits. When enabled considers the threshold limits as probabilities between 0 and 1",
     ),
 ]
@@ -99,7 +98,6 @@ class RingerCommitteeKerasTrainingJobResults(TypedDict):
 type PatienceType = Annotated[
     int,
     Field(
-        25,
         description="Number of epochs with no improvement after which training will be stopped.",
     ),
 ]
@@ -125,11 +123,11 @@ type EtaBinIntervalValue = Annotated[
 ]
 
 
-class RingerCommitteeKerasTrainingJob(BaseModel):
+class MLPKerasTrainingJob(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     # Dataset params
-    batch_size: BatchSizeType
+    batch_size: BatchSizeType = 32
     data_table: DataTableType
     dataset_dir: DirectoryType
     et_col: EtColType
@@ -147,23 +145,28 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
     fold_col: FoldColType
     kfold_table: KFoldTableType
     label_col: LabelColType
-    norm_strategy: NormStrategyType
+    norm_strategy: NormStrategyType = None
     rings_col: RingsColType
-    ring_fraction: RingFractionType
+    ring_fraction: RingFractionType = 2
 
     # Model params
-    model_factory: KerasSequentialModelFactory = Field()
-    from_logits: FromLogitsType
-    epochs: EpochsType
-    verbose: VerboseType
+    model_factory: MLPFactory = Field(
+        ...,
+        description="Description of the MLP model to train.",
+    )
+    from_logits: FromLogitsType = False
+    epochs: EpochsType = 5000
+    verbose: VerboseType = 1
     loss: LossType
     optimizer: OptimizerType
-    balance_class_weights: bool = Field(
-        True,
-        description="Whether to balance class weights during training. If True, the class weights will be set inversely proportional to the class frequencies.",
-    )
+    balance_class_weights: Annotated[
+        bool,
+        Field(
+            description="Whether to balance class weights during training. If True, the class weights will be set inversely proportional to the class frequencies.",
+        ),
+    ] = True
     inits: Annotated[int, Field(description="Number of initializations")] = 5
-    patience: PatienceType
+    patience: PatienceType = 25
 
     # Threshold Fit
     num_thresholds: int = Field(
@@ -196,7 +199,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
     ]
 
     # Misc
-    logger_name: LoggerName
+    logger_name: LoggerName = None
 
     # Model Selection
     best_init: SelectionCriteria = Field(
@@ -209,7 +212,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
     )
 
     # Private
-    _thresholds: list[float] | None = PrivateAttr(default=None)
+    _thresholds: list[float] | None = PrivateAttr(None)
 
     @property
     def thresholds(self) -> list[float]:
@@ -247,7 +250,9 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
         if self.from_logits:
             self._thresholds = inverse_sigmoid(self._thresholds)
 
-        self._thresholds = self._thresholds.tolist()  # Convert to list for JSON serialization
+        self._thresholds = (
+            self._thresholds.tolist()
+        )  # Convert to list for JSON serialization
         self.et_bins.sort()
         self.eta_bins.sort()
 
@@ -422,7 +427,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
             epochs=epochs,
             verbose=self.verbose,
             batch_size=self.batch_size,
-            # class_weight=class_weights,
+            class_weight=class_weights,
         )
         logger.info(f"Finished training for fold {fold} and init {init}")
 
@@ -607,9 +612,7 @@ class RingerCommitteeKerasTrainingJob(BaseModel):
             raise FileNotFoundError(f"Selected models file not found in {output_path}.")
 
         for member_output_path in output_path.glob("member_*"):
-            RingerCommitteeKerasTrainingJob.validate_saved_member_directory(
-                member_output_path
-            )
+            MLPKerasTrainingJob.validate_saved_member_directory(member_output_path)
 
     @staticmethod
     def validate_saved_member_directory(member_output_path: Path | str):
@@ -795,7 +798,7 @@ class BinnedKerasModel(BaseModel):
 
     def preprocessing(self, data: np.ndarray) -> np.ndarray:
         if self.preprocessing == "l1":
-            from ..numpy import alternative_norm1
+            from ...numpy import alternative_norm1
 
             return alternative_norm1(data)
         else:

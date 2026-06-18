@@ -1,12 +1,23 @@
 from pathlib import Path
-import shutil
-import polars as pl
-
-from neuralnet.datasets import ParquetDataset
-from neuralnet.models.vqat import VQATTrainingJob, add_inference
 
 
-def test_vqat_pipeline_from_yaml(test_data_dir: Path):
+def test_vqat_pipeline_from_yaml_routine(test_data_dir: Path, isolated_executor):
+    future = isolated_executor.submit(
+        vqat_pipeline_from_yaml_routine,
+        test_data_dir=test_data_dir,
+    )
+    future.result()
+
+
+def vqat_pipeline_from_yaml_routine(test_data_dir: Path):
+    import shutil
+    import polars as pl
+    import os
+    os.environ["KERAS_BACKEND"] = "tensorflow"
+
+    from neuralnet.datasets import ParquetDataset
+    from neuralnet.models.vqat import VQATTrainingJob, add_inference
+
     dataset_dir = test_data_dir / "test_dataset"
     training_dir = dataset_dir / "training" / "vqat"
     inference_dir = dataset_dir / "inference" / "vqat"

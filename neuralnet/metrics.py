@@ -1,7 +1,9 @@
-from typing import TypedDict
+from typing import TypedDict, TYPE_CHECKING
 import numpy as np
 import numpy.typing as npt
 from numbers import Real
+if TYPE_CHECKING:
+    import torch
 
 from .numpy import Numpy1DIntegerArray, Numpy1DFloatArray
 
@@ -9,6 +11,10 @@ from .numpy import Numpy1DIntegerArray, Numpy1DFloatArray
 def sp_index(tpr: Real, fpr: Real) -> Real:
     """Calculate the SP index"""
     return np.sqrt(np.sqrt(tpr * (1 - fpr)) * (0.5 * (tpr + (1 - fpr))))
+
+def torch_sp_index(tpr: "torch.Tensor", fpr: "torch.Tensor") -> "torch.Tensor":
+    """Calculate the SP index for PyTorch tensors"""
+    return torch.sqrt(torch.sqrt(tpr * (1 - fpr)) * (0.5 * (tpr + (1 - fpr))))
 
 
 class MaxSPDict(TypedDict):
@@ -94,3 +100,5 @@ def enhanced_confusion_matrix(
     }
     enhanced_cm["max_sp"] = max_sp_dict
     return enhanced_cm
+
+

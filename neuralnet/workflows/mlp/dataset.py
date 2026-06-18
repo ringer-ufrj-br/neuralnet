@@ -5,47 +5,8 @@ import polars as pl
 import numpy as np
 import numpy.typing as npt
 
-from ..datasets import ParquetDataset
-
-
-def get_ring_slices_per_layer(fraction: int) -> list[int]:
-    # We select 1/fraction of rings in each layer
-    # pre-sample - 8 rings
-    # EM1 - 64 rings
-    # EM2 - 8 rings
-    # EM3 - 8 rings
-    # Had1 - 4 rings
-    # Had2 - 4 rings
-    # Had3 - 4 rings
-    rings_indexes = []
-    # rings presmaple
-    rings_indexes += list(range(8 // fraction))
-
-    # EM1 list
-    sum_rings = 8
-    rings_indexes += list(range(sum_rings, sum_rings + (64 // fraction)))
-
-    # EM2 list
-    sum_rings = 8 + 64
-    rings_indexes += list(range(sum_rings, sum_rings + (8 // fraction)))
-
-    # EM3 list
-    sum_rings = 8 + 64 + 8
-    rings_indexes += list(range(sum_rings, sum_rings + (8 // fraction)))
-
-    # HAD1 list
-    sum_rings = 8 + 64 + 8 + 8
-    rings_indexes += list(range(sum_rings, sum_rings + (4 // fraction)))
-
-    # HAD2 list
-    sum_rings = 8 + 64 + 8 + 8 + 4
-    rings_indexes += list(range(sum_rings, sum_rings + (4 // fraction)))
-
-    # HAD3 list
-    sum_rings = 8 + 64 + 8 + 8 + 4 + 4
-    rings_indexes += list(range(sum_rings, sum_rings + (4 // fraction)))
-
-    return rings_indexes
+from ...datasets import ParquetDataset
+from ...utils import get_ring_slices_per_layer
 
 
 class Bin(BaseModel):
@@ -60,7 +21,6 @@ class Bin(BaseModel):
 type BatchSizeType = Annotated[
     int,
     Field(
-        32,
         gt=0,
         description="Batch size for the dataset. Must be a positive integer.",
     ),
@@ -91,7 +51,7 @@ type EtColType = Annotated[
 ]
 
 type EtBinType = Annotated[
-    Bin | None, Field(None, description="Definition of the et bin")
+    Bin | None, Field(description="Definition of the et bin")
 ]
 
 type EtaColType = Annotated[
@@ -99,13 +59,12 @@ type EtaColType = Annotated[
 ]
 
 type EtaBinType = Annotated[
-    Bin | None, Field(None, description="Definition of the eta bin")
+    Bin | None, Field(description="Definition of the eta bin")
 ]
 
 type RingFractionType = Annotated[
     int,
     Field(
-        2,
         description="Fraction of the rings to be used for training. If 2, takes the first half of the rings for each layer. If 3, takes the first third of the rings, and so on.",
     ),
 ]
@@ -113,7 +72,6 @@ type RingFractionType = Annotated[
 type ObjectTypeType = Annotated[
     Literal["ringer_parquet_dataset"],
     Field(
-        "ringer_parquet_dataset",
         description="Name of the dataset. Should be 'ringer_parquet_dataset' for this class.",
     ),
 ]
@@ -121,7 +79,6 @@ type ObjectTypeType = Annotated[
 type NormStrategyType = Annotated[
     Literal["l1"] | None,
     Field(
-        None,
         description="Normalization strategy to apply to the rings. If None, no normalization is applied. If 'l1', each ring is divided by the sum of all rings for that sample.",
     ),
 ]
@@ -129,7 +86,6 @@ type NormStrategyType = Annotated[
 type LimitType = Annotated[
     int | None,
     Field(
-        None,
         gt=0,
         description="Limit the number of samples to use from the dataset. Useful for debugging and testing.",
     ),
@@ -144,7 +100,7 @@ class RingerParquetDataset(ParquetDataset):
     LABEL_COL: ClassVar[Literal["label"]] = "label"
     CLASSES: ClassVar[list[int]] = [0, 1]
 
-    batch_size: BatchSizeType
+    batch_size: BatchSizeType = 32
     data_table: DataTableType
     rings_col: RingsColType
     kfold_table: KFoldTableType
@@ -152,13 +108,13 @@ class RingerParquetDataset(ParquetDataset):
     fold_col: FoldColType
     fold: int = Field(0, description="Fold number to use for training.", ge=0)
     et_col: EtColType
-    et_bin: EtBinType
+    et_bin: EtBinType = None
     eta_col: EtaColType
-    eta_bin: EtaBinType
-    ring_fraction: RingFractionType
-    object_type: ObjectTypeType
-    norm_strategy: NormStrategyType
-    limit: LimitType
+    eta_bin: EtaBinType = None
+    ring_fraction: RingFractionType = 2
+    object_type: ObjectTypeType = "ringer_parquet_dataset"
+    norm_strategy: NormStrategyType = None
+    limit: LimitType = None
 
     _fold: int = PrivateAttr(0)
 
@@ -231,9 +187,7 @@ class RingerParquetDataset(ParquetDataset):
         )
         return l1_norm
 
-    def get_fold_data(
-        self, group: DataGroupType
-    ) -> pl.LazyFrame:
+    def get_fold_data(self, group: DataGroupType) -> pl.LazyFrame:
 
         data_df = self.get_dataframe(self.data_table)
         data_filter = self.get_data_filter()
@@ -293,19 +247,30 @@ class RingerParquetDataset(ParquetDataset):
                 raise ValueError(
                     f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'."
                 )
-        class_counts_df = df.select(self.LABEL_COL).group_by(self.LABEL_COL).len(name='count').collect()
-        class_counts = {int(row[self.LABEL_COL]): row['count'] for row in class_counts_df.iter_rows(named=True)}
+        class_counts_df = (
+            df.select(self.LABEL_COL)
+            .group_by(self.LABEL_COL)
+            .len(name="count")
+            .collect()
+        )
+        class_counts = {
+            int(row[self.LABEL_COL]): row["count"]
+            for row in class_counts_df.iter_rows(named=True)
+        }
         for class_ in self.CLASSES:
             if class_ not in class_counts:
                 class_counts[class_] = 0
         total_samples = sum(class_counts.values())
         n_classes = len(self.CLASSES)
-        class_weights = {class_: total_samples / (n_classes*count) if count > 0 else 1. for class_, count in class_counts.items()}
+        class_weights = {
+            class_: total_samples / (n_classes * count) if count > 0 else 1.0
+            for class_, count in class_counts.items()
+        }
         return class_weights
 
     def train_df(self) -> pl.LazyFrame:
         return self.get_fold_data("train")
-    
+
     def train_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("train")
 
@@ -330,7 +295,7 @@ class RingerParquetDataset(ParquetDataset):
 
     def val_df(self) -> pl.LazyFrame:
         return self.get_fold_data("val")
-    
+
     def val_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("val")
 
@@ -355,7 +320,7 @@ class RingerParquetDataset(ParquetDataset):
 
     def test_df(self) -> pl.LazyFrame:
         return self.get_fold_data("test")
-    
+
     def test_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("test")
 

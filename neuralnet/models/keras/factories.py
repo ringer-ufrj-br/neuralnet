@@ -12,14 +12,14 @@ from ...layers.kan import KAN1DLayerFactory
 from ...losses.binary_loss import BinaryCrossEntropyLossFactory
 from ...optimizers.adam import AdamFactory
 
-type EpochsType = Annotated[
+EpochsType = Annotated[
     int,
-    Field(5000, description="Number of epochs to train the model.", gt=0),
+    Field(description="Number of epochs to train the model.", gt=0),
 ]
 
 type VerboseType = Annotated[
     int,
-    Field(1, ge=0, le=2, description="Verbosity of the training."),
+    Field(ge=0, le=2, description="Verbosity of the training."),
 ]
 
 type OptimizerType = Annotated[
@@ -35,7 +35,6 @@ type LossType = Annotated[
 type NameType = Annotated[
     str,
     Field(
-        "keras_sequential",
         pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$",
         description="Name of the model. Must be a valid Python identifier.",
     ),
@@ -68,11 +67,13 @@ type LayersType = Annotated[
 
 class KerasSequentialModelFactory(BaseModel):
     layers: LayersType
-    name: NameType
-    object_type: Literal["keras_sequential"] = Field(
-        "keras_sequential",
-        description="Discriminator field to identify the model type.",
-    )
+    name: NameType = "keras_sequential"
+    object_type: Annotated[
+        Literal["keras_sequential"],
+        Field(
+            description="Discriminator field to identify the model type.",
+        )
+    ] = "keras_sequential"
 
     def as_keras(self):
         from keras import Sequential

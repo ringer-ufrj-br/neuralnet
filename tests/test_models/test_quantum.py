@@ -1,8 +1,5 @@
 import pytest
-import keras
 import numpy as np
-
-from neuralnet.models import quantum
 
 
 @pytest.mark.parametrize(
@@ -43,9 +40,28 @@ from neuralnet.models import quantum
         ),
     ],
 )
-def test_quantum_layer_config_get_returns_torch_module_wrapper(
-    class_name: str, kwargs: dict, name: str
+def test_quantum_layer_config_returns_torch_module_wrapper(
+    class_name: str, kwargs: dict, name: str, isolated_executor
 ):
+    future = isolated_executor.submit(
+        quantum_layer_config_returns_torch_module_wrapper,
+        class_name=class_name,
+        kwargs=kwargs,
+        name=name,
+    )
+    future.result()
+
+
+def quantum_layer_config_returns_torch_module_wrapper(
+    class_name: str,
+    kwargs: dict,
+    name: str,
+):
+    import os
+    os.environ["KERAS_BACKEND"] = "torch"
+    import keras
+    from neuralnet.models import quantum
+
     config_cls = getattr(quantum, class_name)
     config: quantum.QuantumLayer = config_cls(**kwargs)
 
