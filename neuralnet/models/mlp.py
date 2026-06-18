@@ -16,7 +16,7 @@ from functools import cached_property
 from ..tensorflow.tunning import training, RefType
 from .. import get_logger
 from ..datasets import ParquetDataset
-from ..datasets.ringer import get_ring_slices_per_layer
+from ..ringer_committee_trigger.dataset import get_ring_slices_per_layer
 from ..submitit import ExecutorConfig
 from ..utils import pydantic_to_markdown_schema
 

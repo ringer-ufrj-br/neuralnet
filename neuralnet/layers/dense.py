@@ -1,10 +1,8 @@
 from typing import Literal
-from pydantic import Field, ConfigDict
-
-from ..interfaces.keras import KerasFactory
+from pydantic import Field, ConfigDict, BaseModel
 
 
-class DenseFactory(KerasFactory):
+class DenseFactory(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     units: int

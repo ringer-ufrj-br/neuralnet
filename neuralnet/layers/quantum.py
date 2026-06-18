@@ -1,11 +1,5 @@
-from typing import Any, Literal, Callable, Annotated
+from typing import Any, Literal, TypedDict, Annotated
 from pydantic import Field, BaseModel, PrivateAttr
-
-from neuralnet.layers.torch.quantum import WeightShapesDict
-
-from ..interfaces.torch import TorchFactory
-from ..interfaces.keras import KerasFactory
-from ..interfaces.pennylane import PennylaneFactory
 
 type DiffMethodType = Annotated[
     Literal["best", "backprop", "adjoint", "parameter-shift", "finite-diff", "spsa"],
@@ -61,7 +55,11 @@ type AngleEmbeddingRotationType = Annotated[
 ]
 
 
-class AngleEmbedding(BaseModel, PennylaneFactory):
+class WeightShapesDict(TypedDict):
+    weights: tuple[int, ...]
+
+
+class AngleEmbedding(BaseModel):
     object_type: Literal["angle_embedding"] = Field(
         "angle_embedding",
         description='Quantum layer name. Uses "qml.AngleEmbedding".',
@@ -95,7 +93,7 @@ type NLayersType = Annotated[
 ]
 
 
-class BasicEntanglerAnsatz(BaseModel, PennylaneFactory):
+class BasicEntanglerAnsatz(BaseModel):
     object_type: Literal["basic_entangler_ansatz"] = Field(
         "basic_entangler_ansatz",
         description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
@@ -130,7 +128,7 @@ class BasicEntanglerAnsatz(BaseModel, PennylaneFactory):
         return ansatz
 
 
-class StronglyEntanglingAnsatz(BaseModel, PennylaneFactory):
+class StronglyEntanglingAnsatz(BaseModel):
     object_type: Literal["strongly_entangling_ansatz"] = Field(
         "strongly_entangling_ansatz",
         description="Quantum layer name",
@@ -165,7 +163,7 @@ class StronglyEntanglingAnsatz(BaseModel, PennylaneFactory):
         return ansatz
 
 
-class HardwareEfficientAnsatz(BaseModel, PennylaneFactory):
+class HardwareEfficientAnsatz(BaseModel):
     object_type: Literal["hardware_efficient_ansatz"] = Field(
         "hardware_efficient_ansatz",
         description="Quantum layer name. Uses a hardware-efficient Rot + CNOT ansatz.",
@@ -222,7 +220,7 @@ type AnsatzType = Annotated[
 ]
 
 
-class PauliZ(BaseModel, PennylaneFactory):
+class PauliZ(BaseModel):
     object_type: Literal["pauli_z"] = Field(
         "pauli_z",
         description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
@@ -247,7 +245,7 @@ type UnaryOperatorType = Annotated[
 ]
 
 
-class QuantumLayerFactory(BaseModel, TorchFactory, PennylaneFactory, KerasFactory):
+class QuantumLayerFactory(BaseModel):
     object_type: Literal["quantum_layer"] = Field(
         "quantum_layer",
         description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
@@ -337,7 +335,7 @@ class QuantumLayerFactory(BaseModel, TorchFactory, PennylaneFactory, KerasFactor
 class BasicEntanglerQuantumLayerWithAnglerEmbeddingFactory(QuantumLayerFactory):
     object_type: Literal["basic_entangler"] = Field(
         "basic_entangler",
-        description="Quantum layer name. Uses \"qml.BasicEntanglerLayers\".",
+        description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
     )
 
     ansatz: BasicEntanglerAnsatz = Field(

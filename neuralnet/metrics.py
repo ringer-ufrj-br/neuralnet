@@ -10,7 +10,7 @@ def sp_index(tpr: Real, fpr: Real) -> Real:
 
 
 class MaxSPDict(TypedDict):
-    thresholds: float
+    threshold: float
     tn: int
     tp: int
     fn: int

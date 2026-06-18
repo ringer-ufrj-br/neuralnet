@@ -1,4 +1,5 @@
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
+from collections.abc import Mapping, Sequence, Iterable
 from pathlib import Path
 from pydantic import BaseModel
 from pydantic.fields import PydanticUndefined
@@ -153,3 +154,38 @@ def pydantic_to_markdown_schema(model_class: type[BaseModel], indent: int = 0) -
             lines.append(nested_schema)
 
     return "\n".join(lines)
+
+def traverse(
+    d: Mapping[Any, Any] | Iterable[Any], parent_key: str = ""
+) -> Iterator[tuple[str, Any]]:
+    """
+    Recursively traverse a mapping or iterable of objects and yield key-value pairs.
+
+    Parameters
+    ----------
+    d : dict | Iterable
+        The mapping or iterable to traverse.
+    parent_key : str
+        The base key to prepend to each key in the nested mappings.
+
+    Yields
+    ------
+    tuple[str, Any]
+        A tuple containing the full key path and its corresponding value.
+    """
+    if isinstance(d, Mapping):
+        for k, v in d.items():
+            new_key = f"{parent_key}.{k}" if parent_key else k
+            if isinstance(v, (Mapping, Iterable)) and not isinstance(v, (str, bytes)):
+                yield from traverse(v, new_key)
+            else:
+                yield new_key, v
+    elif isinstance(d, Iterable) and not isinstance(d, (str, bytes)):
+        for i, item in enumerate(d):
+            item_key = f"{parent_key}.{i}" if parent_key else str(i)
+            if isinstance(item, (Mapping, Iterable)) and not isinstance(item, (str, bytes)):
+                yield from traverse(item, item_key)
+            else:
+                yield item_key, item
+    else:
+        raise ValueError("Input must be a mapping or an iterable of objects")

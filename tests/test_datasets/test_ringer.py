@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import polars as pl
 
-from neuralnet.datasets.ringer import get_ring_slices_per_layer, Bin, RingerParquetDataset
+from neuralnet.ringer_committee_trigger.dataset import get_ring_slices_per_layer, Bin, RingerParquetDataset
 
 def test_get_ring_slices_per_layer():
     slices_2 = get_ring_slices_per_layer(2)

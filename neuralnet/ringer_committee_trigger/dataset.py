@@ -5,11 +5,7 @@ import polars as pl
 import numpy as np
 import numpy.typing as npt
 
-from . import ParquetDataset
-from .numpy import NumpyDataset
-from .polars import PolarsDataset
-from .torch import TorchDataset
-from .utils import KFoldDataset
+from ..datasets import ParquetDataset
 
 
 def get_ring_slices_per_layer(fraction: int) -> list[int]:
@@ -60,6 +56,7 @@ class Bin(BaseModel):
         description='Whether the bin is closed on the "left" or "right".',
     )
 
+
 type BatchSizeType = Annotated[
     int,
     Field(
@@ -93,7 +90,9 @@ type EtColType = Annotated[
     str, Field(description="Name of the et column in the data table")
 ]
 
-type EtBinType = Annotated[Bin | None, Field(None, description="Definition of the et bin")]
+type EtBinType = Annotated[
+    Bin | None, Field(None, description="Definition of the et bin")
+]
 
 type EtaColType = Annotated[
     str, Field(description="Name of the eta column in the data table")
@@ -136,13 +135,14 @@ type LimitType = Annotated[
     ),
 ]
 
+type DataGroupType = Literal["train", "val", "test", "predict"]
 
-class RingerParquetDataset(
-    ParquetDataset, NumpyDataset, PolarsDataset, TorchDataset, KFoldDataset
-):
+
+class RingerParquetDataset(ParquetDataset):
     model_config = ConfigDict(frozen=True)
 
     LABEL_COL: ClassVar[Literal["label"]] = "label"
+    CLASSES: ClassVar[list[int]] = [0, 1]
 
     batch_size: BatchSizeType
     data_table: DataTableType
@@ -150,6 +150,7 @@ class RingerParquetDataset(
     kfold_table: KFoldTableType
     label_col: LabelColType
     fold_col: FoldColType
+    fold: int = Field(0, description="Fold number to use for training.", ge=0)
     et_col: EtColType
     et_bin: EtBinType
     eta_col: EtaColType
@@ -163,7 +164,7 @@ class RingerParquetDataset(
 
     def get_n_folds(self) -> int:
         n_folds = (
-            pl.scan_parquet(self.get_table_glob(self.kfold_table))
+            self.get_dataframe(self.kfold_table)
             .filter(pl.col(self.fold_col).is_not_null())
             .select(pl.col(self.fold_col).max().alias("max_fold"))
             .collect()
@@ -231,10 +232,10 @@ class RingerParquetDataset(
         return l1_norm
 
     def get_fold_data(
-        self, group: Literal["train", "val", "test", "predict"]
+        self, group: DataGroupType
     ) -> pl.LazyFrame:
 
-        data_df = pl.scan_parquet(self.get_table_glob(self.data_table))
+        data_df = self.get_dataframe(self.data_table)
         data_filter = self.get_data_filter()
         if data_filter is not None:
             data_df = data_df.filter(data_filter)
@@ -254,7 +255,7 @@ class RingerParquetDataset(
 
         label = pl.col(self.label_col).alias(self.LABEL_COL)
         fold_col = pl.col(self.fold_col)
-        fold_df = pl.scan_parquet(self.get_table_glob(self.kfold_table))
+        fold_df = self.get_dataframe(self.kfold_table)
         fold = pl.lit(self._fold, dtype=pl.dtype_of(fold_col))
         match group:
             case "train":
@@ -278,8 +279,35 @@ class RingerParquetDataset(
 
         return return_df
 
+    def get_class_weights(self, group: DataGroupType) -> dict[int, float]:
+        match group:
+            case "train":
+                df = self.train_df()
+            case "val":
+                df = self.val_df()
+            case "test":
+                df = self.test_df()
+            case "predict":
+                df = self.predict_df()
+            case _:
+                raise ValueError(
+                    f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'."
+                )
+        class_counts_df = df.select(self.LABEL_COL).group_by(self.LABEL_COL).len(name='count').collect()
+        class_counts = {int(row[self.LABEL_COL]): row['count'] for row in class_counts_df.iter_rows()}
+        for class_ in self.CLASSES:
+            if class_ not in class_counts:
+                class_counts[class_] = 0
+        total_samples = sum(class_counts.values())
+        n_classes = len(self.CLASSES)
+        class_weights = {class_: total_samples / (n_classes*count) if count > 0 else 1. for class_, count in class_counts.items()}
+        return class_weights
+
     def train_df(self) -> pl.LazyFrame:
         return self.get_fold_data("train")
+    
+    def train_class_weights(self) -> dict[int, float]:
+        return self.get_class_weights("train")
 
     def train_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
         train_df = self.train_df().collect()
@@ -302,6 +330,9 @@ class RingerParquetDataset(
 
     def val_df(self) -> pl.LazyFrame:
         return self.get_fold_data("val")
+    
+    def val_class_weights(self) -> dict[int, float]:
+        return self.get_class_weights("val")
 
     def val_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
         val_df = self.val_df().collect()
@@ -324,6 +355,9 @@ class RingerParquetDataset(
 
     def test_df(self) -> pl.LazyFrame:
         return self.get_fold_data("test")
+    
+    def test_class_weights(self) -> dict[int, float]:
+        return self.get_class_weights("test")
 
     def test_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
         test_df = self.test_df().collect()
@@ -343,6 +377,9 @@ class RingerParquetDataset(
             )
         )
         return DataLoader(test_df, batch_size=self.batch_size, shuffle=False)
+
+    def predict_class_weights(self) -> dict[int, float]:
+        return self.get_class_weights("predict")
 
     def predict_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
         predict_df = self.predict_df().collect()
@@ -365,15 +402,3 @@ class RingerParquetDataset(
             )
         )
         return DataLoader(predict_df, batch_size=self.batch_size, shuffle=False)
-
-    def set_fold(self, fold: int) -> None:
-        n_folds = self.get_n_folds()
-        if fold < 0 or fold >= n_folds:
-            raise ValueError(
-                f"Fold index out of range. Must be between 0 and {n_folds - 1}."
-            )
-        self._fold = fold
-
-    @property
-    def current_fold(self) -> int:
-        return self._fold

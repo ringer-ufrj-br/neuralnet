@@ -1,9 +1,8 @@
 from typing import Literal
-from pydantic import Field
-from ..interfaces.keras import KerasFactory
+from pydantic import Field, BaseModel
 
 
-class BinaryCrossEntropyLossFactory(KerasFactory):
+class BinaryCrossEntropyLossFactory(BaseModel):
     """Configuration for binary cross-entropy loss."""
 
     object_type: Literal["binary_cross_entropy"] = Field(

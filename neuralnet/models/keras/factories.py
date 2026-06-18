@@ -8,6 +8,7 @@ from ...layers.quantum import (
     StronglyEntanglingQuantumLayerWithAnglerEmbeddingFactory,
     HardwareEfficientQuantumLayerWithAnglerEmbeddingFactory,
 )
+from ...layers.kan import KAN1DLayerFactory
 from ...losses.binary_loss import BinaryCrossEntropyLossFactory
 from ...optimizers.adam import AdamFactory
 
@@ -54,6 +55,7 @@ type LayerType = Annotated[
         | BasicEntanglerQuantumLayerWithAnglerEmbeddingFactory
         | StronglyEntanglingQuantumLayerWithAnglerEmbeddingFactory
         | HardwareEfficientQuantumLayerWithAnglerEmbeddingFactory
+        | KAN1DLayerFactory
     ),
     Field(discriminator="object_type", description="Layer configuration field."),
 ]
@@ -67,6 +69,10 @@ type LayersType = Annotated[
 class KerasSequentialModelFactory(BaseModel):
     layers: LayersType
     name: NameType
+    object_type: Literal["keras_sequential"] = Field(
+        "keras_sequential",
+        description="Discriminator field to identify the model type.",
+    )
 
     def as_keras(self):
         from keras import Sequential
@@ -75,14 +81,13 @@ class KerasSequentialModelFactory(BaseModel):
         return Sequential(layers, name=self.name)
 
 
-type StandardReturnDictValues = JsonValue | datetime
-
-
-class StandardEvaluationDict(TypedDict, extra_items=StandardReturnDictValues):
+class StandardEvaluationDict(TypedDict):
     loss: float
     start: datetime
     end: datetime
 
 
-class StandardFitDict(StandardEvaluationDict):
+class StandardFitDict(TypedDict):
     loss: list[float]
+    start: datetime
+    end: datetime

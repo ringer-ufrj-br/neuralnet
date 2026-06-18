@@ -1,10 +1,8 @@
 from typing import Literal
-from pydantic import Field
-
-from ..interfaces.keras import KerasFactory
+from pydantic import Field, BaseModel
 
 
-class AdamFactory(KerasFactory):
+class AdamFactory(BaseModel):
     object_type: Literal["adam"] = Field("adam", description="This optimizer name.")
 
     learning_rate: float = Field(0.001, description="Learning rate for the optimizer.")

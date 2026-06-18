@@ -1,9 +1,9 @@
 from pathlib import Path
 from typing import Annotated
-import duckdb
+from functools import cached_property
 
 from pydantic import BaseModel, Field
-import typer
+import polars as pl
 
 
 type RefType = dict[str, dict[str, dict[str, float]]]
@@ -30,23 +30,35 @@ class ParquetDataset(BaseModel):
             return Path(self.dataset_dir) / table_name
         return Path(self.dataset_dir) / f"{table_name}.parquet"
 
-app = typer.Typer()
+    def get_dataframe(self, table_name: str) -> pl.LazyFrame:
+        return pl.scan_parquet(self.get_table_path(table_name))
+
+    @cached_property
+    def sql_context(self) -> pl.SQLContext:
+        dataframes = {
+            table.stem: self.get_dataframe(table.stem)
+            for table in self.dataset_dir.glob("*.parquet")
+        }
+        return pl.SQLContext(**dataframes)
 
 
-@app.command()
-def print_schema(
-    dataset_dir: Annotated[
-        Path,
-        typer.Option("--dataset-dir", help="Directory containing the dataset files"),
-    ],
-):
-    dataset = ParquetDataset(dataset_dir=dataset_dir)
-    for table in dataset_dir.glob("*.parquet"):
-        with duckdb.connect(":memory:") as conn:
-            res = conn.execute(
-                f"DESCRIBE SELECT * FROM read_parquet('{str(dataset.get_table_glob(table.name))}')"
-            ).fetch_df()
-        print(20 * "-")
-        print(f"Schema for {table.name}:")
-        print(res.to_string())
-        print(20 * "-")
+# app = typer.Typer()
+
+
+# @app.command()
+# def print_schema(
+#     dataset_dir: Annotated[
+#         Path,
+#         typer.Option("--dataset-dir", help="Directory containing the dataset files"),
+#     ],
+# ):
+#     dataset = ParquetDataset(dataset_dir=dataset_dir)
+#     for table in dataset_dir.glob("*.parquet"):
+#         with duckdb.connect(":memory:") as conn:
+#             res = conn.execute(
+#                 f"DESCRIBE SELECT * FROM read_parquet('{str(dataset.get_table_glob(table.name))}')"
+#             ).fetch_df()
+#         print(20 * "-")
+#         print(f"Schema for {table.name}:")
+#         print(res.to_string())
+#         print(20 * "-")
