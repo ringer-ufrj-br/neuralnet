@@ -12,10 +12,22 @@ from ...utils import get_ring_slices_per_layer
 class Bin(BaseModel):
     low: float = Field(..., description="Lower bound of the bin")
     high: float = Field(..., description="Upper bound of the bin")
-    closed: str = Field(
+    closed: Literal["left", "right"] = Field(
         "left",
         description='Whether the bin is closed on the "left" or "right".',
     )
+
+    def model_post_init(self, context):
+        if self.low >= self.high:
+            raise ValueError(
+                f"Bin lower bound must be less than upper bound. Got low={self.low} and high={self.high}."
+            )
+        return super().model_post_init(context)
+
+
+class EtaBin(Bin):
+    low: float = Field(..., ge=0)
+    high: float = Field(..., ge=0)
 
 
 type BatchSizeType = Annotated[
@@ -50,17 +62,13 @@ type EtColType = Annotated[
     str, Field(description="Name of the et column in the data table")
 ]
 
-type EtBinType = Annotated[
-    Bin | None, Field(description="Definition of the et bin")
-]
+type EtBinType = Annotated[Bin | None, Field(description="Definition of the et bin")]
 
 type EtaColType = Annotated[
     str, Field(description="Name of the eta column in the data table")
 ]
 
-type EtaBinType = Annotated[
-    Bin | None, Field(description="Definition of the eta bin")
-]
+type EtaBinType = Annotated[EtaBin | None, Field(description="Definition of the eta bin")]
 
 type RingFractionType = Annotated[
     int,

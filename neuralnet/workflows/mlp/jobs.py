@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel,
     computed_field,
     validate_call,
+    AfterValidator,
 )
 import logging
 from pathlib import Path
@@ -48,6 +49,7 @@ from ...utils import traverse
 from ...polars import PolarsExpression
 from ...datasets import DirectoryType
 from ...json import cast_to_json_value
+from .dataset import Bin, EtaBin
 
 type RingerTrainingJobDatasetType = Annotated[
     RingerParquetDataset,
@@ -123,6 +125,44 @@ type EtaBinIntervalValue = Annotated[
 ]
 
 
+class BinValidator:
+    def __init__(self, bin_class: type[Bin]):
+        self.bin_class = bin_class
+
+    def __call__(self, et_bins: list[Bin | float]) -> list[Bin]:
+        length = len(et_bins)
+        if length < 2 and isinstance(et_bins[0], float):
+            raise ValueError(
+                f"et_bins must have at least 2 values to define a bin. Got {length} value(s)."
+            )
+        if isinstance(et_bins[0], float):
+            et_bins = [
+                self.bin_class(low=et_bins[i], high=et_bins[i + 1], closed="left")
+                for i in range(length - 1)
+            ]
+            return et_bins
+        return et_bins
+
+
+type EtBinType = Annotated[
+    list[Bin | float],
+    Field(
+        description="Bins to be used for the Et variable. Must be a list of increasing values.",
+        min_length=1,
+    ),
+    AfterValidator(BinValidator(Bin)),
+]
+
+type EtaBinType = Annotated[
+    list[EtaBin | float],
+    Field(
+        description="Bins to be used for the Eta variable. Must be a list of increasing values.",
+        min_length=1,
+    ),
+    AfterValidator(BinValidator(EtaBin)),
+]
+
+
 class MLPKerasTrainingJob(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -131,17 +171,9 @@ class MLPKerasTrainingJob(BaseModel):
     data_table: DataTableType
     dataset_dir: DirectoryType
     et_col: EtColType
-    et_bins: list[float] = Field(
-        ...,
-        description="Bins to be used for the Et variable. Must be a list of increasing values.",
-        min_length=2,
-    )
+    et_bins: EtBinType
     eta_col: EtaColType
-    eta_bins: list[EtaBinIntervalValue] = Field(
-        ...,
-        description="Bins to be used for the Eta variable. Must be a list of increasing values.",
-        min_length=2,
-    )
+    eta_bins: EtaBinType
     fold_col: FoldColType
     kfold_table: KFoldTableType
     label_col: LabelColType
@@ -285,11 +317,9 @@ class MLPKerasTrainingJob(BaseModel):
         n_folds = dataset.get_n_folds()
         logger.info(f"The dataset has {n_folds} folds.")
 
-        et_bin_idxs = range(len(self.et_bins) - 1)
-        eta_bin_idxs = range(len(self.eta_bins) - 1)
         folds_range = range(n_folds)
         inits_range = range(self.inits)
-        iterator = product(et_bin_idxs, eta_bin_idxs, folds_range, inits_range)
+        iterator = product(self.et_bins, self.eta_bins, folds_range, inits_range)
         executor = self.executor_config.get_executor()
         members = {
             "id": [],
@@ -304,17 +334,7 @@ class MLPKerasTrainingJob(BaseModel):
         }
         submitted_jobs = []
         with executor.batch():
-            for member_id, (et_bin_idx, eta_bin_idx, fold, init) in enumerate(iterator):
-                et_bin = Bin(
-                    low=self.et_bins[et_bin_idx],
-                    high=self.et_bins[et_bin_idx + 1],
-                    closed="left",
-                )
-                eta_bin = Bin(
-                    low=self.eta_bins[eta_bin_idx],
-                    high=self.eta_bins[eta_bin_idx + 1],
-                    closed="left",
-                )
+            for member_id, (et_bin, eta_bin, fold, init) in enumerate(iterator):
                 logger.info(
                     f"{member_id}: Submitting training for Et bin {et_bin} and Eta bin {eta_bin}, fold {fold} and init {init}"
                 )

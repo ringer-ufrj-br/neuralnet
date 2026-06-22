@@ -153,7 +153,7 @@ def keras_ringer_committee_keras_training_job(tmp_path: Path, job_config: dict):
 
 @pytest.fixture
 def ringer_dataset(test_data_dir: Path):
-    from neuralnet.workflows.mlp.dataset import RingerParquetDataset, Bin
+    from neuralnet.workflows.mlp.dataset import RingerParquetDataset, Bin, EtaBin
 
     dataset_dir = str(test_data_dir / "test_dataset")
     return RingerParquetDataset(
@@ -166,7 +166,7 @@ def ringer_dataset(test_data_dir: Path):
         et_col="TrigEMClusterContainer.et",
         eta_col="TrigEMClusterContainer.eta",
         et_bin=Bin(low=15000.0, high=20000.0),
-        eta_bin=Bin(low=0.0, high=0.8),
+        eta_bin=EtaBin(low=0.0, high=0.8),
         ring_fraction=2,
         batch_size=32,
     )
