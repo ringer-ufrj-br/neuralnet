@@ -275,12 +275,24 @@ class RingerParquetDataset(ParquetDataset):
             for class_, count in class_counts.items()
         }
         return class_weights
+    
+    def get_sample_weights_expr(self, group: DataGroupType) -> pl.Expr:
+        class_weights = self.get_class_weights(group)
+        weights_expr = pl.col(self.LABEL_COL).replace(class_weights).alias("sample_weight")
+        return weights_expr
+    
+    def get_sample_weights(self, group: DataGroupType) -> pl.LazyFrame:
+        expr = self.get_sample_weights_expr(group)
+        return self.get_fold_data(group).select(expr)
 
     def train_df(self) -> pl.LazyFrame:
         return self.get_fold_data("train")
 
     def train_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("train")
+    
+    def train_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
+        return self.get_sample_weights("train").collect().to_numpy().flatten()
 
     def train_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
         train_df = self.train_df().collect()
@@ -306,6 +318,9 @@ class RingerParquetDataset(ParquetDataset):
 
     def val_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("val")
+    
+    def val_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
+        return self.get_sample_weights("val").collect().to_numpy().flatten()
 
     def val_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
         val_df = self.val_df().collect()
@@ -331,6 +346,9 @@ class RingerParquetDataset(ParquetDataset):
 
     def test_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("test")
+    
+    def test_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
+        return self.get_sample_weights("test").collect().to_numpy().flatten()
 
     def test_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
         test_df = self.test_df().collect()
@@ -353,6 +371,9 @@ class RingerParquetDataset(ParquetDataset):
 
     def predict_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("predict")
+    
+    def predict_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
+        return self.get_sample_weights("predict").collect().to_numpy().flatten()
 
     def predict_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
         predict_df = self.predict_df().collect()

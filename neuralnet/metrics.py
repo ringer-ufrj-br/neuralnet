@@ -83,7 +83,7 @@ def enhanced_confusion_matrix(
     enhanced_cm["sp"] = sp
     tpr_argsort = np.argsort(tpr)
 
-    enhanced_cm["auc"] = float(np.trapezoid(tpr[tpr_argsort], fpr[tpr_argsort]))
+    enhanced_cm["auc"] = float(np.trapezoid(fpr[tpr_argsort], tpr[tpr_argsort]))
 
     sp_argmax = np.argmax(sp)
     max_sp_dict = {

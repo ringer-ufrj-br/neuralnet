@@ -68,13 +68,13 @@ def fit_routine(
         validation_data=val_data,
         epochs=epochs,
         verbose=verbose,
-        # callbacks=callbacks,
+        callbacks=callbacks,
         shuffle=True,
         batch_size=batch_size,
-        # class_weight=class_weight,
+        class_weight=class_weight,
     )
     end = datetime.now()
-    logger.info(f"Finished training for model {model.name} with history: {history}")
+    # logger.info(f"Finished training for model {model.name} with history: {history}")
     logger.info(f"Training step: {end - start}")
 
     history: dict[str, JsonValue] = cast_to_json_value(history.history)
@@ -115,7 +115,7 @@ def evaluation_routine(
     results = model.evaluate(*data, verbose=verbose, return_dict=True)
     results = cast_to_json_value(results)
     end = datetime.now()
-    logger.info(f"Finished evaluating for model {model.name} with results: {results}")
+    # logger.info(f"Finished evaluating for model {model.name} with results: {results}")
     logger.info(f"Evaluation step: {end - start}")
     results["start"] = start
     results["end"] = end

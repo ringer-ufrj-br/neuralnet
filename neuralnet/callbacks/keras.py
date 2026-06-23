@@ -5,20 +5,25 @@ from sklearn.metrics import roc_curve
 import numpy as np
 
 from .. import logger
+from ..numpy import sigmoid
 
 
 class SP(Callback):
 
     def __init__(self,
                  validation_data,
+                 sample_weight=None,
                  verbose=False,
                  save_the_best=False,
-                 patience=False):
+                 patience=False,
+                 from_logits=False):
 
         super().__init__()
         self.verbose = verbose
         self.patience = patience
         self.save_the_best = save_the_best
+        self.sample_weight = sample_weight
+        self.from_logits = from_logits
 
         self.count = 0
         self.__best_sp = -1.0
@@ -30,15 +35,17 @@ class SP(Callback):
         y_true = self.validation_data[1]
         y_hat = self.model.predict(
             self.validation_data[0], batch_size=1024).ravel()
-
+        if self.from_logits:
+            y_hat = sigmoid(y_hat)  # Apply sigmoid to logits
         # Computes SP
-        fa, pd, thresholds = roc_curve(y_true, y_hat)
+        fa, pd, thresholds = roc_curve(y_true, y_hat, sample_weight=self.sample_weight)
         sp = np.sqrt(np.sqrt(pd*(1-fa)) * (0.5*(pd+(1-fa))))
 
         knee = np.argmax(sp)
-        logs['max_sp_val'] = sp[knee]
-        logs['max_sp_fa_val'] = fa[knee]
-        logs['max_sp_pd_val'] = pd[knee]
+        logs['val_max_sp'] = sp[knee]
+        logs['val_max_sp_fa'] = fa[knee]
+        logs['val_max_sp_pd'] = pd[knee]
+        logs['val_max_sp_threshold'] = thresholds[knee]
 
         if self.verbose:
             logger.info("val_sp: {:.4f} (fa:{:.4f},pd:{:.4f}), patience: {}".format(sp[knee],
@@ -49,13 +56,13 @@ class SP(Callback):
             if self.save_the_best:
                 logger.info('Saving the best configuration here...')
                 self.__best_weights = self.model.get_weights()
-                logs['max_sp_best_epoch_val'] = epoch
+                logs['val_max_sp_best_epoch'] = epoch
         elif round(sp[knee], 4) > round(self.__best_sp, 4):
             self.__best_sp = sp[knee]
             if self.save_the_best:
                 logger.info('Saving the best configuration here...')
                 self.__best_weights = self.model.get_weights()
-                logs['max_sp_best_epoch_val'] = epoch
+                logs['val_max_sp_best_epoch'] = epoch
             self.count = 0
         else:
             self.count += 1

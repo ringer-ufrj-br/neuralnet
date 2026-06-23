@@ -1,9 +1,13 @@
 import numpy as np
 
 
-def inverse_sigmoid(y):
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+
+def inverse_sigmoid(y, epsilon=1e-15):
     # Clips values to avoid division by zero or log of zero
-    y = np.clip(y, 1e-15, 1 - 1e-15)
+    y = np.clip(y, epsilon, 1 - epsilon)
     return np.log(y / (1 - y))
 
 

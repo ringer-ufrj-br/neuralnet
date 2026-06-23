@@ -34,6 +34,7 @@ from .dataset import (
     EtColType,
     EtaColType,
     Bin,
+    EtaBin,
 )
 from ...numpy import inverse_sigmoid
 from ...metrics import enhanced_confusion_matrix, EnhancedConfusionMatrixDict
@@ -49,7 +50,7 @@ from ...utils import traverse
 from ...polars import PolarsExpression
 from ...datasets import DirectoryType
 from ...json import cast_to_json_value
-from .dataset import Bin, EtaBin
+from ...pydantic import YamlBaseModel
 
 type RingerTrainingJobDatasetType = Annotated[
     RingerParquetDataset,
@@ -131,11 +132,12 @@ class BinValidator:
 
     def __call__(self, et_bins: list[Bin | float]) -> list[Bin]:
         length = len(et_bins)
-        if length < 2 and isinstance(et_bins[0], float):
+        is_float = isinstance(et_bins[0], float)
+        if length < 2 and is_float:
             raise ValueError(
                 f"et_bins must have at least 2 values to define a bin. Got {length} value(s)."
             )
-        if isinstance(et_bins[0], float):
+        if is_float:
             et_bins = [
                 self.bin_class(low=et_bins[i], high=et_bins[i + 1], closed="left")
                 for i in range(length - 1)
@@ -163,7 +165,7 @@ type EtaBinType = Annotated[
 ]
 
 
-class MLPKerasTrainingJob(BaseModel):
+class MLPKerasTrainingJob(YamlBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     # Dataset params
@@ -279,14 +281,10 @@ class MLPKerasTrainingJob(BaseModel):
             self.upper_threshold,
             self.num_thresholds,
         )
-        if self.from_logits:
-            self._thresholds = inverse_sigmoid(self._thresholds)
 
         self._thresholds = (
             self._thresholds.tolist()
         )  # Convert to list for JSON serialization
-        self.et_bins.sort()
-        self.eta_bins.sort()
 
         return res
 
@@ -296,7 +294,7 @@ class MLPKerasTrainingJob(BaseModel):
         logger.info(
             f"Starting job with model {self.model_factory.name} on dataset at {self.dataset_dir}"
         )
-        self.output_path.mkdir(parents=True)
+        self.output_path.mkdir(parents=True, exist_ok=True)
         self.output_path.joinpath("config.json").write_text(
             self.model_dump_json(indent=4, exclude={"models", "results"}),
             encoding="utf-8",
@@ -431,6 +429,7 @@ class MLPKerasTrainingJob(BaseModel):
             patience=self.patience,
             verbose=self.verbose,
             save_the_best=True,
+            from_logits=self.from_logits
         )
         callbacks = [sp_callback]
         train_data = dataset.train_numpy()
@@ -460,6 +459,7 @@ class MLPKerasTrainingJob(BaseModel):
             loss=self.loss.as_keras(),
             optimizer=self.optimizer.as_keras(),
             metrics=self.get_metrics(),
+            verbose=self.verbose
         )
         results["train"] = self.process_eval_dict(
             eval_dict, dataset=dataset, data_category="train"
@@ -472,6 +472,7 @@ class MLPKerasTrainingJob(BaseModel):
             loss=self.loss.as_keras(),
             optimizer=self.optimizer.as_keras(),
             metrics=self.get_metrics(),
+            verbose=self.verbose
         )
         results["val"] = self.process_eval_dict(
             eval_dict, dataset=dataset, data_category="val"
@@ -486,6 +487,7 @@ class MLPKerasTrainingJob(BaseModel):
                 loss=self.loss.as_keras(),
                 optimizer=self.optimizer.as_keras(),
                 metrics=self.get_metrics(),
+                verbose=self.verbose
             )
             results["test"] = self.process_eval_dict(
                 eval_dict, dataset=dataset, data_category="test"
@@ -504,6 +506,7 @@ class MLPKerasTrainingJob(BaseModel):
         logger.info(f"Saved results to {output_dir}")
 
         del model
+        results_path.unlink()
         from keras.backend import clear_session
 
         clear_session()
@@ -591,7 +594,10 @@ class MLPKerasTrainingJob(BaseModel):
             for key, value in traverse(member_results, include_sequences=False):
                 all_models_results[key].append(value)
 
-        all_model_results_df = pl.DataFrame(all_models_results)
+        all_model_results_df = pl.DataFrame(all_models_results).with_columns(
+            pl.col('fit.start').str.to_datetime(),
+            pl.col('fit.end').str.to_datetime()
+        )
         all_model_results_df.write_parquet(self.all_models_results_path)
 
         bins_cols = [
