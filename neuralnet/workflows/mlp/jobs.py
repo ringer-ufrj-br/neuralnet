@@ -1,7 +1,10 @@
 from collections import defaultdict
 
 import polars as pl
-from typing import Annotated, Any, Literal, NotRequired, Self, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, Self, TypedDict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hgq.config import QuantizerConfig
 from itertools import product
 from pydantic import (
     Field,
@@ -270,6 +273,19 @@ class MLPKerasTrainingJob(YamlBaseModel):
     def selected_models_path(self) -> Path:
         return self.output_path / "selected_models.parquet"
 
+    def get_member_output_dir(self, member_id: int) -> Path:
+        return self.output_path / f"member_{member_id}"
+
+    def get_member_model_path(self, member: Path | int) -> Path:
+        if isinstance(member, int):
+            member = self.get_member_output_dir(member)
+        return member / "model.keras"
+
+    def get_member_results_path(self, member: Path | int) -> Path:
+        if isinstance(member, int):
+            member = self.get_member_output_dir(member)
+        return member / "results.json.zip"
+
     def model_post_init(self, context):
         res = super().model_post_init(context)
         if self.lower_threshold >= self.upper_threshold:
@@ -296,7 +312,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
         )
         self.output_path.mkdir(parents=True, exist_ok=True)
         self.output_path.joinpath("config.json").write_text(
-            self.model_dump_json(indent=4, exclude={"models", "results"}),
+            self.model_dump_json(indent=4),
             encoding="utf-8",
         )
 
@@ -319,46 +335,36 @@ class MLPKerasTrainingJob(YamlBaseModel):
         inits_range = range(self.inits)
         iterator = product(self.et_bins, self.eta_bins, folds_range, inits_range)
         executor = self.executor_config.get_executor()
-        members = {
-            "id": [],
-            "et_bin.low": [],
-            "et_bin.high": [],
-            "et_bin.closed": [],
-            "eta_bin.low": [],
-            "eta_bin.high": [],
-            "eta_bin.closed": [],
-            "fold": [],
-            "init": [],
-        }
         submitted_jobs = []
         with executor.batch():
             for member_id, (et_bin, eta_bin, fold, init) in enumerate(iterator):
-                logger.info(
-                    f"{member_id}: Submitting training for Et bin {et_bin} and Eta bin {eta_bin}, fold {fold} and init {init}"
-                )
-                submitted_job = executor.submit(
-                    self._run_training,
-                    member_id,
-                    et_bin.model_dump(),
-                    eta_bin.model_dump(),
-                    fold,
-                    init,
-                )
-                submitted_jobs.append(submitted_job)
-                members["id"].append(member_id)
-                members["fold"].append(fold)
-                members["init"].append(init)
-                members["et_bin.low"].append(et_bin.low)
-                members["et_bin.high"].append(et_bin.high)
-                members["et_bin.closed"].append(et_bin.closed)
-                members["eta_bin.low"].append(eta_bin.low)
-                members["eta_bin.high"].append(eta_bin.high)
-                members["eta_bin.closed"].append(eta_bin.closed)
+                member_output_path = self.get_member_output_dir(member_id)
+                try:
+                    MLPKerasTrainingJob.validate_saved_member_directory(
+                        member_output_path
+                    )
+                    logger.info(
+                        f"{member_id}: Member directory {member_output_path} already exists and is valid. Skipping training."
+                    )
+                    continue
+                except (FileNotFoundError, NotADirectoryError):
+                    logger.info(
+                        f"{member_id}: Submitting training for Et bin {et_bin} and Eta bin {eta_bin}, fold {fold} and init {init}"
+                    )
+                    submitted_job = executor.submit(
+                        self._run_training,
+                        member_id,
+                        et_bin.model_dump(),
+                        eta_bin.model_dump(),
+                        fold,
+                        init,
+                    )
+                    submitted_jobs.append(submitted_job)
 
         dependent_executor = self.executor_config.get_executor()
         from submitit import AutoExecutor
 
-        if isinstance(dependent_executor, AutoExecutor):
+        if isinstance(dependent_executor, AutoExecutor) and submitted_jobs:
             dependency_string = ":".join(str(job.job_id) for job in submitted_jobs)
             logger.info(
                 f"Submitting dependent job with dependency on jobs: {dependency_string}"
@@ -368,7 +374,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
                     "dependency": f"afterok:{dependency_string}"
                 }
             )
-        dependent_executor.submit(self.post_training, members)
+        dependent_executor.submit(self.post_training)
 
         logger.info("All jobs submitted.")
 
@@ -429,7 +435,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
             patience=self.patience,
             verbose=self.verbose,
             save_the_best=True,
-            from_logits=self.from_logits
+            from_logits=self.from_logits,
         )
         callbacks = [sp_callback]
         train_data = dataset.train_numpy()
@@ -450,7 +456,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
         )
         logger.info(f"Finished training for fold {fold} and init {init}")
 
-        model_path = output_dir / "model.keras"
+        model_path = self.get_member_model_path(output_dir)
         model.save(str(model_path))
 
         eval_dict = evaluation_routine(
@@ -459,7 +465,8 @@ class MLPKerasTrainingJob(YamlBaseModel):
             loss=self.loss.as_keras(),
             optimizer=self.optimizer.as_keras(),
             metrics=self.get_metrics(),
-            verbose=self.verbose
+            verbose=self.verbose,
+            batch_size=self.batch_size,
         )
         results["train"] = self.process_eval_dict(
             eval_dict, dataset=dataset, data_category="train"
@@ -472,7 +479,8 @@ class MLPKerasTrainingJob(YamlBaseModel):
             loss=self.loss.as_keras(),
             optimizer=self.optimizer.as_keras(),
             metrics=self.get_metrics(),
-            verbose=self.verbose
+            verbose=self.verbose,
+            batch_size=self.batch_size,
         )
         results["val"] = self.process_eval_dict(
             eval_dict, dataset=dataset, data_category="val"
@@ -487,7 +495,8 @@ class MLPKerasTrainingJob(YamlBaseModel):
                 loss=self.loss.as_keras(),
                 optimizer=self.optimizer.as_keras(),
                 metrics=self.get_metrics(),
-                verbose=self.verbose
+                verbose=self.verbose,
+                batch_size=self.batch_size,
             )
             results["test"] = self.process_eval_dict(
                 eval_dict, dataset=dataset, data_category="test"
@@ -495,11 +504,11 @@ class MLPKerasTrainingJob(YamlBaseModel):
             del test_numpy
 
         logger.info(f"Finished evaluating for fold {fold} and init {init}")
-        results_path = output_dir / "results.json"
+        zip_path = self.get_member_results_path(output_dir)
+        results_path = Path(str(zip_path).replace(".zip", ""))
         with results_path.open("w", encoding="utf-8") as f:
             json.dump(cast_to_json_value(results), f, indent=4)
 
-        zip_path = output_dir / "results.json.zip"
         with ZipFile(zip_path, "w", ZIP_DEFLATED) as zipf:
             zipf.write(results_path, arcname="results.json")
 
@@ -580,13 +589,13 @@ class MLPKerasTrainingJob(YamlBaseModel):
             enhanced_cm_dict["weighted"] = weighted_enhanced_cm_dict
         return enhanced_cm_dict
 
-    def post_training(self, members):
-        members_df = pl.DataFrame(members)
+    def post_training(self):
+        logger = logging.getLogger(self.logger_name)
         all_models_results = defaultdict(list)
-        for row in members_df.iter_rows(named=True):
-            member_id = row["id"]
+        for member_path in self.output_path.glob("member_*"):
+            member_id = int(member_path.name.split("_")[-1])
             all_models_results["id"].append(member_id)
-            results_path = self.get_member_output_dir(member_id) / "results.json.zip"
+            results_path = self.get_member_results_path(member_path)
             with ZipFile(results_path, "r") as zipf:
                 with zipf.open("results.json") as f:
                     member_results = json.load(f)
@@ -594,9 +603,11 @@ class MLPKerasTrainingJob(YamlBaseModel):
             for key, value in traverse(member_results, include_sequences=False):
                 all_models_results[key].append(value)
 
+        logger.info(
+            f"Computing best models based on the selection criteria: init: {self.best_init}, fold: {self.best_fold}"
+        )
         all_model_results_df = pl.DataFrame(all_models_results).with_columns(
-            pl.col('fit.start').str.to_datetime(),
-            pl.col('fit.end').str.to_datetime()
+            pl.col("fit.start").str.to_datetime(), pl.col("fit.end").str.to_datetime()
         )
         all_model_results_df.write_parquet(self.all_models_results_path)
 
@@ -617,9 +628,6 @@ class MLPKerasTrainingJob(YamlBaseModel):
             == pl.col(self.best_fold.key).max().over(bins_cols)
         )
         selected_models.write_parquet(self.selected_models_path)
-
-    def get_member_output_dir(self, member_id: int) -> Path:
-        return self.output_path / f"member_{member_id}"
 
     @staticmethod
     def validate_saved_directory(output_path: Path | str):
@@ -651,6 +659,13 @@ class MLPKerasTrainingJob(YamlBaseModel):
             raise NotADirectoryError(
                 f"Member directory {member_output_path} is not a directory."
             )
+
+        model_path = member_output_path / "model.keras"
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model file not found in {member_output_path}.")
+        results_path = member_output_path / "results.json.zip"
+        if not results_path.exists():
+            raise FileNotFoundError(f"Results file not found in {member_output_path}.")
 
     @classmethod
     def load(cls, path: Path | str) -> Self:
@@ -729,14 +744,14 @@ class MLPKerasTrainingJob(YamlBaseModel):
                 bins=[
                     VariableBin(
                         col=et_col,
-                        lower=row["et_bin.lower"],
-                        upper=row["et_bin.upper"],
+                        lower=row["et_bin.low"],
+                        upper=row["et_bin.high"],
                         closed=row["et_bin.closed"],
                     ),
                     VariableBin(
                         col=eta_col,
-                        lower=row["eta_bin.lower"],
-                        upper=row["eta_bin.upper"],
+                        lower=row["eta_bin.low"],
+                        upper=row["eta_bin.high"],
                         closed=row["eta_bin.closed"],
                     ),
                 ],
@@ -782,6 +797,9 @@ class VariableBin(BaseModel):
             return self.lower <= value <= self.upper
         else:
             return self.lower < value < self.upper
+
+
+type QuantizerConfigType = "QuantizerConfig" | None
 
 
 class BinnedKerasModel(BaseModel):
@@ -840,6 +858,33 @@ class BinnedKerasModel(BaseModel):
         prediction = self.model.predict(data)
         return prediction.flatten()
 
+    def quantize(
+        self, kq_conf: QuantizerConfigType = None, bq_conf: QuantizerConfigType = None
+    ) -> Self:
+        from keras import Input, Model
+        from ...layers.dense.hgq import HGQDense
+
+        input_layer = Input(shape=self.keras_model.input_shape[1:])
+        quantized_layer = input_layer
+        for fp_layer in self.keras_model.layers:
+            quantized_layer = HGQDense.from_keras_dense(
+                fp_layer, kq_conf=kq_conf, bq_conf=bq_conf
+            )(quantized_layer)
+
+        quantized_keras_model = Model(
+            inputs=input_layer,
+            outputs=quantized_layer,
+            name=f"{self.keras_model.name}_quantized",
+        )
+
+        quantized_binned_model = BinnedKerasModel(
+            bins=self.bins,
+            keras_model=quantized_keras_model,
+            preprocessing=self.preprocessing,
+            features=self.features,
+        )
+        return quantized_binned_model
+
 
 class BinnedKerasModelSpecialistCommittee(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -880,3 +925,9 @@ class BinnedKerasModelSpecialistCommittee(BaseModel):
             filtered = filtered.with_columns(pl.Series(prediction).alias("prediction"))
             prediction_df.append(filtered)
         return pl.concat(prediction_df)
+
+    def quantize(
+        self, kq_conf: QuantizerConfigType = None, bq_conf: QuantizerConfigType = None
+    ) -> Self:
+        quantized_models = [model.quantize(kq_conf, bq_conf) for model in self.models]
+        return self.model_copy(update={"models": quantized_models})

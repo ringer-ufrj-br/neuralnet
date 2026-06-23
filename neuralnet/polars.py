@@ -24,7 +24,7 @@ def polars_expression_validator(
     if isinstance(value, pl.Expr):
         return value
     elif isinstance(value, str):
-        return pl.sql(value)
+        return pl.col(value)
     else:
         raise ValueError(f"Invalid Polars expression: {value}")
 

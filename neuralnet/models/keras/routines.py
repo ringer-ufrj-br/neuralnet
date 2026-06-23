@@ -102,6 +102,7 @@ def evaluation_routine(
     metrics: list[Metric | str] | None = None,
     callbacks: list[Callback] | None = None,
     verbose: VerboseType = 1,
+    batch_size: int | None = None,
 ) -> StandardEvaluationDict:
     logger = logging.getLogger("neuralnet")
     if metrics is None:
@@ -112,7 +113,7 @@ def evaluation_routine(
 
     start = datetime.now()
     model = safe_jit_compile(model, loss=loss, optimizer=optimizer, metrics=metrics)
-    results = model.evaluate(*data, verbose=verbose, return_dict=True)
+    results = model.evaluate(*data, verbose=verbose, return_dict=True, batch_size=batch_size)
     results = cast_to_json_value(results)
     end = datetime.now()
     # logger.info(f"Finished evaluating for model {model.name} with results: {results}")

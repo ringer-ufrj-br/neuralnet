@@ -1,6 +1,6 @@
 from functools import cached_property
-from typing import Annotated, Literal, ClassVar
-from pydantic import ConfigDict, Field, BaseModel, PrivateAttr
+from typing import Annotated, Any, Literal, ClassVar
+from pydantic import ConfigDict, Field, BaseModel, PrivateAttr, field_serializer, BeforeValidator
 import polars as pl
 import numpy as np
 import numpy.typing as npt
@@ -9,9 +9,26 @@ from ...datasets import ParquetDataset
 from ...utils import get_ring_slices_per_layer
 
 
+def infinity_validator(value: Any) -> float:
+    if value == "inf" or value == "Infinity":
+        return float("inf")
+    elif value == "-inf" or value == "-Infinity":
+        return float("-inf")
+    return float(value)
+
+Infinityvalidator = BeforeValidator(infinity_validator)
+
 class Bin(BaseModel):
-    low: float = Field(..., description="Lower bound of the bin")
-    high: float = Field(..., description="Upper bound of the bin")
+    low: Annotated[
+        float,
+        Field(..., description="Lower bound of the bin"),
+        Infinityvalidator
+    ]
+    high: Annotated[
+        float,
+        Field(..., description="Upper bound of the bin"),
+        Infinityvalidator
+    ]
     closed: Literal["left", "right"] = Field(
         "left",
         description='Whether the bin is closed on the "left" or "right".',
@@ -23,11 +40,28 @@ class Bin(BaseModel):
                 f"Bin lower bound must be less than upper bound. Got low={self.low} and high={self.high}."
             )
         return super().model_post_init(context)
+    
+    @field_serializer("low", "high")
+    def serialize_bound(self, value: float) -> str | float:
+        if value == float("inf"):
+            return "Infinity"
+        if value == float("-inf"):
+            return "-Infinity"
+        return value
+
 
 
 class EtaBin(Bin):
-    low: float = Field(..., ge=0)
-    high: float = Field(..., ge=0)
+    low: Annotated[
+        float,
+        Field(..., ge=0, description="Lower bound of the bin"),
+        Infinityvalidator
+    ]
+    high: Annotated[
+        float,
+        Field(..., ge=0, description="Upper bound of the bin"),
+        Infinityvalidator
+    ]
 
 
 type BatchSizeType = Annotated[
