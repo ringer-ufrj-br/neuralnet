@@ -17,5 +17,14 @@ def alternative_norm1(data):
     return data / norms[:, None]
 
 
+def fixed_point_quantization_alternative_norm1(data, i0, f0):
+    scale = 2**f0
+    quantized_data = np.round(data * scale).astype(np.int32)
+    quantized_data = np.clip(
+        quantized_data, -(2 ** (i0 + f0 - 1)), 2 ** (i0 + f0 - 1) - 1
+    )
+    return quantized_data / scale
+
+
 type Numpy1DIntegerArray = np.ndarray[tuple[int], np.integer]
 type Numpy1DFloatArray = np.ndarray[tuple[int], np.floating]

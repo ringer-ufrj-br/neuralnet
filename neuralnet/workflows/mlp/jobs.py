@@ -39,7 +39,6 @@ from .dataset import (
     Bin,
     EtaBin,
 )
-from ...numpy import inverse_sigmoid
 from ...metrics import enhanced_confusion_matrix, EnhancedConfusionMatrixDict
 from ...models.keras.factories import (
     EpochsType,
@@ -724,7 +723,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
         et_col: PolarsExpression | None = None,
         eta_col: PolarsExpression | None = None,
         rings_col: PolarsExpression | None = None,
-    ):
+    ) -> "BinnedKerasModelSpecialistCommittee":
         from keras.models import Model
 
         selected_models = []
