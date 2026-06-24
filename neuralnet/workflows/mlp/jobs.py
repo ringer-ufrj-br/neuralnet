@@ -1,7 +1,7 @@
 from collections import defaultdict
 
 import polars as pl
-from typing import Annotated, Any, Literal, NotRequired, Self, TypedDict, TYPE_CHECKING
+from typing import Annotated, Any, Literal, NotRequired, Self, TypedDict, TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from hgq.config import QuantizerConfig
@@ -49,10 +49,16 @@ from ...models.keras.factories import (
 )
 from ...layers.dense import MLPFactory
 from ...utils import traverse
-from ...polars import PolarsExpression
+from ...polars import (
+    PolarsExpression,
+    AlternativeNorm1,
+    PolarsFrame,
+    FixedPointQuantizedAlternativeNorm1
+)
 from ...datasets import DirectoryType
 from ...json import cast_to_json_value
 from ...pydantic import YamlBaseModel
+from ...quantization import FixedPointQuantizer
 
 type RingerTrainingJobDatasetType = Annotated[
     RingerParquetDataset,
@@ -141,7 +147,8 @@ class BinValidator:
             )
         if is_float:
             et_bins = [
-                self.bin_class(low=et_bins[i], high=et_bins[i + 1], closed="left")
+                self.bin_class(
+                    low=et_bins[i], high=et_bins[i + 1], closed="left")
                 for i in range(length - 1)
             ]
             return et_bins
@@ -332,7 +339,8 @@ class MLPKerasTrainingJob(YamlBaseModel):
 
         folds_range = range(n_folds)
         inits_range = range(self.inits)
-        iterator = product(self.et_bins, self.eta_bins, folds_range, inits_range)
+        iterator = product(self.et_bins, self.eta_bins,
+                           folds_range, inits_range)
         executor = self.executor_config.get_executor()
         submitted_jobs = []
         with executor.batch():
@@ -364,7 +372,8 @@ class MLPKerasTrainingJob(YamlBaseModel):
         from submitit import AutoExecutor
 
         if isinstance(dependent_executor, AutoExecutor) and submitted_jobs:
-            dependency_string = ":".join(str(job.job_id) for job in submitted_jobs)
+            dependency_string = ":".join(str(job.job_id)
+                                         for job in submitted_jobs)
             logger.info(
                 f"Submitting dependent job with dependency on jobs: {dependency_string}"
             )
@@ -606,7 +615,8 @@ class MLPKerasTrainingJob(YamlBaseModel):
             f"Computing best models based on the selection criteria: init: {self.best_init}, fold: {self.best_fold}"
         )
         all_model_results_df = pl.DataFrame(all_models_results).with_columns(
-            pl.col("fit.start").str.to_datetime(), pl.col("fit.end").str.to_datetime()
+            pl.col("fit.start").str.to_datetime(), pl.col(
+                "fit.end").str.to_datetime()
         )
         all_model_results_df.write_parquet(self.all_models_results_path)
 
@@ -642,10 +652,12 @@ class MLPKerasTrainingJob(YamlBaseModel):
                 f"All models results file not found in {output_path}."
             )
         if not (output_path / "selected_models.parquet").exists():
-            raise FileNotFoundError(f"Selected models file not found in {output_path}.")
+            raise FileNotFoundError(
+                f"Selected models file not found in {output_path}.")
 
         for member_output_path in output_path.glob("member_*"):
-            MLPKerasTrainingJob.validate_saved_member_directory(member_output_path)
+            MLPKerasTrainingJob.validate_saved_member_directory(
+                member_output_path)
 
     @staticmethod
     def validate_saved_member_directory(member_output_path: Path | str):
@@ -661,10 +673,12 @@ class MLPKerasTrainingJob(YamlBaseModel):
 
         model_path = member_output_path / "model.keras"
         if not model_path.exists():
-            raise FileNotFoundError(f"Model file not found in {member_output_path}.")
+            raise FileNotFoundError(
+                f"Model file not found in {member_output_path}.")
         results_path = member_output_path / "results.json.zip"
         if not results_path.exists():
-            raise FileNotFoundError(f"Results file not found in {member_output_path}.")
+            raise FileNotFoundError(
+                f"Results file not found in {member_output_path}.")
 
     @classmethod
     def load(cls, path: Path | str) -> Self:
@@ -710,7 +724,8 @@ class MLPKerasTrainingJob(YamlBaseModel):
 
         results_path = member_output_dir / "results.json.zip"
         if not results_path.exists():
-            raise FileNotFoundError(f"Results file not found at {results_path}")
+            raise FileNotFoundError(
+                f"Results file not found at {results_path}")
         with ZipFile(results_path, "r") as zipf:
             with zipf.open("results.json") as f:
                 results = json.load(f)
@@ -723,22 +738,41 @@ class MLPKerasTrainingJob(YamlBaseModel):
         et_col: PolarsExpression | None = None,
         eta_col: PolarsExpression | None = None,
         rings_col: PolarsExpression | None = None,
-    ) -> "BinnedKerasModelSpecialistCommittee":
+    ) -> tuple[
+        Callable[[PolarsFrame], PolarsFrame],
+        AlternativeNorm1,
+        'BinnedKerasModelSpecialistCommittee'
+    ]:
+        if et_col is None:
+            et_col = pl.col(self.et_col)
+        else:
+            et_col = pl.col(et_col.meta.output_name())
+
+        if eta_col is None:
+            eta_col = pl.col(self.eta_col)
+        else:
+            eta_col = pl.col(eta_col.meta.output_name())
+
+        if rings_col is None:
+            rings_col = pl.col(self.rings_col)
+        else:
+            rings_col = pl.col(rings_col.meta.output_name())
+
+        if self.norm_strategy == 'l1':
+            preprocessing = AlternativeNorm1(
+                input_col=self.rings_col,
+                output_col=f'{self.rings_col.meta.output_name()}_normalized'
+            )
+        else:
+            raise ValueError(
+                f"Unknown normalization strategy: {self.norm_strategy}")
+
         from keras.models import Model
 
         selected_models = []
         for row in self.selected_models.iter_rows(named=True):
             member_id = row["id"]
             keras_model: Model = self.get_member_model(member_id)
-            if et_col is None:
-                et_col = pl.col(self.et_col)
-
-            if eta_col is None:
-                eta_col = pl.col(self.eta_col)
-
-            if rings_col is None:
-                rings_col = pl.col(self.rings_col)
-
             model = BinnedKerasModel(
                 bins=[
                     VariableBin(
@@ -755,15 +789,43 @@ class MLPKerasTrainingJob(YamlBaseModel):
                     ),
                 ],
                 keras_model=keras_model,
-                preprocessing=self.norm_strategy,
-                features=[self.rings_col],
+                features=[preprocessing.output_col],
             )
             selected_models.append(model)
 
         if not selected_models:
             raise ValueError("No selected models found.")
 
-        return BinnedKerasModelSpecialistCommittee(models=selected_models)
+        committee_model = BinnedKerasModelSpecialistCommittee(
+            models=selected_models
+        )
+
+        def model_pipeline(data: PolarsFrame) -> PolarsFrame:
+            return data.pipe(preprocessing).pipe(committee_model.predict)
+
+        return model_pipeline, preprocessing, committee_model
+
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
+    def get_fixed_point_quantized_committee_model(
+        self,
+        fixed_point_quantizer: FixedPointQuantizer,
+        et_col: PolarsExpression | None = None,
+        eta_col: PolarsExpression | None = None,
+        rings_col: PolarsExpression | None = None,
+        kq_conf: QuantizerConfigType | None = None,
+        bq_conf: QuantizerConfigType | None = None,
+    ) -> tuple[
+        Callable[[PolarsFrame], PolarsFrame],
+        FixedPointQuantizedAlternativeNorm1,
+        'BinnedKerasModelSpecialistCommittee'
+    ]:
+        _, preprocessing, committee_model = self.get_committee_model(
+            et_col, eta_col, rings_col)
+        quantized_committee = committee_model.quantize(kq_conf, bq_conf)
+        quantized_preprocessing = preprocessing.quantize(fixed_point_quantizer)
+        def model_pipeline(data: PolarsFrame) -> PolarsFrame:
+            return data.pipe(quantized_preprocessing).pipe(quantized_committee.predict)
+        return model_pipeline, quantized_preprocessing, quantized_committee
 
 
 class VariableBin(BaseModel):
@@ -784,7 +846,7 @@ class VariableBin(BaseModel):
         description="Polars condition for this bin",
     )
     @cached_property
-    def is_inside_bin_polars(self) -> pl.Expr:
+    def is_inside_bin_polars_expr(self) -> pl.Expr:
         return self.col.is_between(self.lower, self.upper, closed=self.closed)
 
     def is_inside_numpy(self, value):
@@ -806,8 +868,13 @@ class BinnedKerasModel(BaseModel):
 
     bins: list[VariableBin]
     keras_model: Any
-    preprocessing: Literal["l1"]
     features: list[PolarsExpression]
+    decision_threshold: Annotated[
+        float,
+        Field(
+            description="Decision threshold for the binary classification model."
+        ),
+    ]
 
     def model_post_init(self, context):
         self.features = [
@@ -818,7 +885,7 @@ class BinnedKerasModel(BaseModel):
     @cached_property
     def row_selector(self) -> pl.Expr:
         return pl.all_horizontal(
-            [bin.is_inside_bin_polars for bin in self.bins]
+            [bin.is_inside_bin_polars_expr for bin in self.bins]
             + [feature.is_not_null() for feature in self.features]
         )
 
@@ -839,23 +906,17 @@ class BinnedKerasModel(BaseModel):
             .otherwise(pl.lit(None, dtype=pl.Float32))
         )
 
-    def preprocessing(self, data: np.ndarray) -> np.ndarray:
-        if self.preprocessing == "l1":
-            from ...numpy import alternative_norm1
-
-            return alternative_norm1(data)
-        else:
-            raise ValueError(f"Unknown preprocessing strategy: {self.preprocessing}")
-
     def predict_polars_batch(self, batch: pl.Series) -> pl.Series:
         data = np.stack(batch.to_numpy())
         prediction = self.predict_numpy(data)
         return pl.Series(prediction.flatten(), dtype=pl.Float32)
 
     def predict_numpy(self, data: np.ndarray) -> np.ndarray:
-        data = self.preprocessing(data).astype(np.float32)
-        prediction = self.model.predict(data)
-        return prediction.flatten()
+        prediction = self.model.predict(data).flatten()
+        classification = np.where(
+            prediction >= self.decision_threshold, True, False).astype(bool)
+        results = np.column_stack([prediction, classification])
+        return results
 
     def quantize(
         self, kq_conf: QuantizerConfigType = None, bq_conf: QuantizerConfigType = None
@@ -879,8 +940,8 @@ class BinnedKerasModel(BaseModel):
         quantized_binned_model = BinnedKerasModel(
             bins=self.bins,
             keras_model=quantized_keras_model,
-            preprocessing=self.preprocessing,
             features=self.features,
+            decision_threshold=self.decision_threshold,
         )
         return quantized_binned_model
 
@@ -904,13 +965,15 @@ class BinnedKerasModelSpecialistCommittee(BaseModel):
             prediction_col = prediction_col.when(model.row_selector).then(
                 model.batched_predict_polars
             )
-        prediction_col = prediction_col.otherwise(pl.lit(None, dtype=pl.Float32))
+        prediction_col = prediction_col.otherwise(
+            pl.lit(None, dtype=pl.Float32))
         return prediction_col
 
     def predict(self, data: pl.LazyFrame | pl.DataFrame) -> pl.DataFrame:
         prediction_df = []
         for model in self.models:
-            filtered = data.filter(model.row_selector).select("id", *model.features)
+            filtered = data.filter(model.row_selector).select(
+                "id", *model.features)
             if isinstance(filtered, pl.LazyFrame):
                 filtered = filtered.collect()
             if filtered.is_empty():
@@ -921,12 +984,14 @@ class BinnedKerasModelSpecialistCommittee(BaseModel):
             filtered = filtered.drop(pl.exclude("id"))
             prediction = model.predict(features).astype(np.float32)
             del features  # Frees memory premptively
-            filtered = filtered.with_columns(pl.Series(prediction).alias("prediction"))
+            filtered = filtered.with_columns(
+                pl.Series(prediction).alias("prediction"))
             prediction_df.append(filtered)
         return pl.concat(prediction_df)
 
     def quantize(
         self, kq_conf: QuantizerConfigType = None, bq_conf: QuantizerConfigType = None
     ) -> Self:
-        quantized_models = [model.quantize(kq_conf, bq_conf) for model in self.models]
+        quantized_models = [model.quantize(
+            kq_conf, bq_conf) for model in self.models]
         return self.model_copy(update={"models": quantized_models})
