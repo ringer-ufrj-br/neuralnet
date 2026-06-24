@@ -96,7 +96,7 @@ nest-asyncio==1.6.0
 networkx==3.6.1
 notebook_shim==0.2.4
 numexpr==2.14.1
-numpy==1.26.4
+# numpy==1.26.4
 nvidia-cublas==13.1.0.3
 nvidia-cuda-cupti==13.0.85
 nvidia-cuda-nvrtc==13.0.88
@@ -171,7 +171,7 @@ tables==3.10.2
 tensorboard==2.20.0
 tensorboard-data-server==0.7.2
 tensorflow==2.20.0
-tensorflow-model-optimization==0.8.0
+# tensorflow-model-optimization==0.8.0
 termcolor==3.3.0
 terminado==0.18.1
 threadpoolctl==3.6.0
