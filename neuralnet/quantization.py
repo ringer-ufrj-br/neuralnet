@@ -35,4 +35,4 @@ class FixedPointQuantizer(BaseModel):
         return 2 ** self.fractional_bits
 
     def quantize_polars_expr(self, expr: pl.Expr) -> pl.Expr:
-        return (expr * self.floating_power).round().clip(self.lower_bound, self.upper_bound).truediv(self.floating_power)
+        return (expr.clip(self.lower_bound, self.upper_bound) * self.floating_power).round().truediv(self.floating_power)
