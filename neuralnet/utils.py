@@ -100,6 +100,34 @@ def traverse(
         raise ValueError("Input must be a mapping or an iterable of objects")
 
 
+def unflatten_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
+    """
+    Unflatten a mapping with dot-separated keys into a nested dictionary.
+
+    Parameters
+    ----------
+    mapping : Mapping[str, Any]
+        A mapping with dot-separated keys.
+
+    Returns
+    -------
+    dict[str, Any]
+        A nested dictionary representation of the input mapping.
+    """
+    result: dict[str, Any] = {}
+    for key, value in mapping.items():
+        parts = key.split(".")
+        d = result
+        for part in parts[:-1]:
+            if part in d and not isinstance(d[part], dict):
+                raise KeyError(f"Duplicate key found: {key}")
+            elif part not in d:
+                d[part] = {}
+            d = d[part]
+        d[parts[-1]] = value
+    return result
+
+
 def get_ring_slices_per_layer(fraction: int) -> list[int]:
     # We select 1/fraction of rings in each layer
     # pre-sample - 8 rings
