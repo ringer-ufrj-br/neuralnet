@@ -64,7 +64,7 @@ def plot_metric_comparison(
         labelsize="small",
     )
     bottom_ax.set_ylabel(rf"$\frac{{\mathrm{{Model}}}}{{{to_plot[ref_name]['label']}}}$", fontsize="medium", rotation=90)
-    bottom_ax.axhline(1, color="k", linestyle="--", alpha=0.5)
+    bottom_ax.axhline(1, color="k", linestyle="--", alpha=0.5, label="Equal")
 
     if xlim is not None:
         top_ax.set_xlim(*xlim)
@@ -118,6 +118,6 @@ def plot_metric_comparison(
         )
         i += 1
     top_ax.legend(fontsize="small")
-    # bottom_ax.legend(fontsize='small')
+    bottom_ax.legend(fontsize='small')
     fig.tight_layout()
     return fig, top_ax, bottom_ax
