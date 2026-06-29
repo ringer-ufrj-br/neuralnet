@@ -2,6 +2,7 @@ from typing import TypedDict, TYPE_CHECKING
 import numpy as np
 import numpy.typing as npt
 from numbers import Real
+
 if TYPE_CHECKING:
     import torch
 
@@ -11,6 +12,7 @@ from .numpy import Numpy1DIntegerArray, Numpy1DFloatArray
 def sp_index(tpr: Real, fpr: Real) -> Real:
     """Calculate the SP index"""
     return np.sqrt(np.sqrt(tpr * (1 - fpr)) * (0.5 * (tpr + (1 - fpr))))
+
 
 def torch_sp_index(tpr: "torch.Tensor", fpr: "torch.Tensor") -> "torch.Tensor":
     """Calculate the SP index for PyTorch tensors"""
@@ -46,6 +48,20 @@ class EnhancedConfusionMatrixDict(TypedDict):
     sp: Numpy1DFloatArray
     auc: np.floating
     max_sp: MaxSPDict
+
+
+def enhanced_confusion_matrix_numpy(y_true, y_pred) -> EnhancedConfusionMatrixDict:
+    from sklearn.metrics import confusion_matrix_at_thresholds
+
+    cm: tuple[
+        Numpy1DIntegerArray,
+        Numpy1DIntegerArray,
+        Numpy1DIntegerArray,
+        Numpy1DIntegerArray,
+        Numpy1DFloatArray,
+    ] = confusion_matrix_at_thresholds(y_true, y_pred, pos_label=1)
+    tn, fp, fn, tp, thresholds = cm
+    return enhanced_confusion_matrix(tn, tp, fn, fp, thresholds)
 
 
 def enhanced_confusion_matrix(
@@ -100,5 +116,3 @@ def enhanced_confusion_matrix(
     }
     enhanced_cm["max_sp"] = max_sp_dict
     return enhanced_cm
-
-
