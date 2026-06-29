@@ -5,7 +5,7 @@ from neuralnet.polars import (
     AlternativeNorm1,
     FixedPointQuantizedAlternativeNorm1,
 )
-from neuralnet.quantization import FixedPointQuantizer
+from neuralnet.quantization.quantizers import FixedPointQuantizer
 
 
 def assert_nested_lists_close(actual: list[list[float]], expected: list[list[float]]) -> None:
