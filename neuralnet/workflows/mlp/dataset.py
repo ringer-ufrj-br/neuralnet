@@ -1,12 +1,17 @@
-from functools import cached_property
 from typing import Annotated, Any, Literal, ClassVar
-from pydantic import ConfigDict, Field, BaseModel, PrivateAttr, field_serializer, BeforeValidator
+from pydantic import (
+    ConfigDict,
+    Field,
+    BaseModel,
+    PrivateAttr,
+    field_serializer,
+    BeforeValidator,
+)
 import polars as pl
 import numpy as np
 import numpy.typing as npt
-
 from ...datasets import ParquetDataset
-from ...utils import get_ring_slices_per_layer
+from ... import get_logger
 
 
 def infinity_validator(value: Any) -> float:
@@ -16,18 +21,16 @@ def infinity_validator(value: Any) -> float:
         return float("-inf")
     return float(value)
 
+
 Infinityvalidator = BeforeValidator(infinity_validator)
+
 
 class Bin(BaseModel):
     low: Annotated[
-        float,
-        Field(..., description="Lower bound of the bin"),
-        Infinityvalidator
+        float, Field(..., description="Lower bound of the bin"), Infinityvalidator
     ]
     high: Annotated[
-        float,
-        Field(..., description="Upper bound of the bin"),
-        Infinityvalidator
+        float, Field(..., description="Upper bound of the bin"), Infinityvalidator
     ]
     closed: Literal["left", "right"] = Field(
         "left",
@@ -40,7 +43,7 @@ class Bin(BaseModel):
                 f"Bin lower bound must be less than upper bound. Got low={self.low} and high={self.high}."
             )
         return super().model_post_init(context)
-    
+
     @field_serializer("low", "high")
     def serialize_bound(self, value: float) -> str | float:
         if value == float("inf"):
@@ -50,17 +53,12 @@ class Bin(BaseModel):
         return value
 
 
-
 class EtaBin(Bin):
     low: Annotated[
-        float,
-        Field(..., ge=0, description="Lower bound of the bin"),
-        Infinityvalidator
+        float, Field(..., ge=0, description="Lower bound of the bin"), Infinityvalidator
     ]
     high: Annotated[
-        float,
-        Field(..., ge=0, description="Upper bound of the bin"),
-        Infinityvalidator
+        float, Field(..., ge=0, description="Upper bound of the bin"), Infinityvalidator
     ]
 
 
@@ -102,7 +100,9 @@ type EtaColType = Annotated[
     str, Field(description="Name of the eta column in the data table")
 ]
 
-type EtaBinType = Annotated[EtaBin | None, Field(description="Definition of the eta bin")]
+type EtaBinType = Annotated[
+    EtaBin | None, Field(description="Definition of the eta bin")
+]
 
 type RingFractionType = Annotated[
     int,
@@ -139,24 +139,15 @@ type DataGroupType = Literal["train", "val", "test", "predict"]
 class RingerParquetDataset(ParquetDataset):
     model_config = ConfigDict(frozen=True)
 
-    LABEL_COL: ClassVar[Literal["label"]] = "label"
+    N_RINGS: ClassVar[int] = 100
     CLASSES: ClassVar[list[int]] = [0, 1]
 
-    batch_size: BatchSizeType = 32
     data_table: DataTableType
     rings_col: RingsColType
     kfold_table: KFoldTableType
-    label_col: LabelColType
-    fold_col: FoldColType
+    label_col: LabelColType = "label"
+    fold_col: FoldColType = "kfold"
     fold: int = Field(0, description="Fold number to use for training.", ge=0)
-    et_col: EtColType
-    et_bin: EtBinType = None
-    eta_col: EtaColType
-    eta_bin: EtaBinType = None
-    ring_fraction: RingFractionType = 2
-    object_type: ObjectTypeType = "ringer_parquet_dataset"
-    norm_strategy: NormStrategyType = None
-    limit: LimitType = None
 
     _fold: int = PrivateAttr(0)
 
@@ -170,108 +161,40 @@ class RingerParquetDataset(ParquetDataset):
         )
         return n_folds + 1  # Folds are 0-indexed
 
-    def get_data_filter(self) -> pl.Expr | None:
-        filters = []
-        if self.et_bin is not None:
-            et_col_expr = pl.col(self.et_col)
-            filters.append(
-                et_col_expr.is_between(
-                    pl.lit(self.et_bin.low, dtype=pl.dtype_of(et_col_expr)),
-                    pl.lit(self.et_bin.high, dtype=pl.dtype_of(et_col_expr)),
-                    closed=self.et_bin.closed,
-                )
-            )
-        if self.eta_bin is not None:
-            eta_col_expr = pl.col(self.eta_col)
-            filters.append(
-                eta_col_expr.abs().is_between(
-                    pl.lit(self.eta_bin.low, dtype=pl.dtype_of(eta_col_expr)),
-                    pl.lit(self.eta_bin.high, dtype=pl.dtype_of(eta_col_expr)),
-                    closed=self.eta_bin.closed,
-                )
-            )
-        if filters:
-            return pl.all_horizontal(*filters)
-        return None
 
-    def get_rings_expr(self):
+    def open_rings_expr(self) -> tuple[list[pl.Expr], list[str]]:
         rings = []
         names = []
-        for ring_idx in get_ring_slices_per_layer(self.ring_fraction):
-            name = f"ring_{ring_idx}"
+        for ring_idx in range(self.N_RINGS):
+            name = f"{self.rings_col}.{ring_idx}"
             names.append(name)
             rings.append(pl.col(self.rings_col).list.get(ring_idx).alias(name))
         return rings, names
 
-    @cached_property
-    def rings_aliases(self) -> list[str]:
-        return [
-            f"ring_{ring_idx}"
-            for ring_idx in get_ring_slices_per_layer(self.ring_fraction)
-        ]
-
-    @cached_property
-    def rings_exprs(self) -> list[pl.Expr]:
-        rings = []
-        for ring_idx, name in zip(
-            get_ring_slices_per_layer(self.ring_fraction), self.rings_aliases
-        ):
-            rings.append(pl.col(self.rings_col).list.get(ring_idx).alias(name))
-        return rings
-
-    @cached_property
-    def l1_norm(self) -> pl.Expr:
-        rings_sum = pl.col(self.rings_col).list.sum().abs()
-        l1_norm = (
-            pl.when(rings_sum != 0)
-            .then(rings_sum)
-            .otherwise(pl.lit(1.0, dtype=pl.dtype_of(rings_sum)))
-        )
-        return l1_norm
 
     def get_fold_data(self, group: DataGroupType) -> pl.LazyFrame:
 
         data_df = self.get_dataframe(self.data_table)
-        data_filter = self.get_data_filter()
-        if data_filter is not None:
-            data_df = data_df.filter(data_filter)
-        if self.limit is not None:
-            data_df = data_df.limit(self.limit)
-        match self.norm_strategy:
-            case "l1":
-                l1_alias = self.l1_norm.alias("l1_norm")
-                rings_exprs = [expr.truediv(l1_alias) for expr in self.rings_exprs]
-            case None:
-                rings_exprs = self.rings_exprs
-            case _:
-                raise ValueError(
-                    f"Invalid normalization strategy: {self.norm_strategy}. Must be one of None or 'l1'."
-                )
-        data_df = data_df.select("id", *rings_exprs)
 
-        label = pl.col(self.label_col).alias(self.LABEL_COL)
+        label = pl.col(self.label_col)
         fold_col = pl.col(self.fold_col)
         fold_df = self.get_dataframe(self.kfold_table)
-        fold = pl.lit(self._fold, dtype=pl.dtype_of(fold_col))
+        fold = pl.lit(self.fold, dtype=pl.dtype_of(fold_col))
         match group:
             case "train":
-                fold_df = fold_df.filter(
-                    (label.is_not_null()) & (fold_col != fold)
-                ).select("id", label)
+                fold_df = fold_df.filter((label.is_not_null()) & (fold_col != fold))
             case "val":
-                fold_df = fold_df.filter(
-                    (label.is_not_null()) & (fold_col == fold)
-                ).select("id", label)
+                fold_df = fold_df.filter((label.is_not_null()) & (fold_col == fold))
             case "test":
-                fold_df = fold_df.filter(label.is_not_null()).select("id", label)
+                fold_df = fold_df.filter(label.is_not_null())
             case "predict":
-                fold_df = fold_df.select("id", label)
+                pass
             case _:
                 raise ValueError(
                     f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'."
                 )
 
-        return_df = data_df.join(fold_df, on="id", how="inner").drop("id")
+        return_df = data_df.join(fold_df, on="id", how="inner")
 
         return return_df
 
@@ -290,17 +213,19 @@ class RingerParquetDataset(ParquetDataset):
                     f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'."
                 )
         class_counts_df = (
-            df.select(self.LABEL_COL)
-            .group_by(self.LABEL_COL)
+            df.select(self.label_col)
+            .group_by(self.label_col)
             .len(name="count")
             .collect()
         )
         class_counts = {
-            int(row[self.LABEL_COL]): row["count"]
+            int(row[self.label_col]): row["count"]
             for row in class_counts_df.iter_rows(named=True)
         }
+        logger = get_logger()
         for class_ in self.CLASSES:
             if class_ not in class_counts:
+                logger.warning(f"Class {class_} not found in {group} set")
                 class_counts[class_] = 0
         total_samples = sum(class_counts.values())
         n_classes = len(self.CLASSES)
@@ -309,12 +234,14 @@ class RingerParquetDataset(ParquetDataset):
             for class_, count in class_counts.items()
         }
         return class_weights
-    
+
     def get_sample_weights_expr(self, group: DataGroupType) -> pl.Expr:
         class_weights = self.get_class_weights(group)
-        weights_expr = pl.col(self.LABEL_COL).replace(class_weights).alias("sample_weight")
+        weights_expr = (
+            pl.col(self.label_col).replace(class_weights).alias("sample_weight")
+        )
         return weights_expr
-    
+
     def get_sample_weights(self, group: DataGroupType) -> pl.LazyFrame:
         expr = self.get_sample_weights_expr(group)
         return self.get_fold_data(group).select(expr)
@@ -324,109 +251,110 @@ class RingerParquetDataset(ParquetDataset):
 
     def train_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("train")
-    
+
     def train_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
         return self.get_sample_weights("train").collect().to_numpy().flatten()
 
     def train_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
-        train_df = self.train_df().collect()
-        X = train_df.drop(self.LABEL_COL).to_numpy()
-        y = train_df.select(self.LABEL_COL).to_numpy().flatten()
+        df = self.train_df()
+        open_rings_expr, _ = self.open_rings_expr()
+        X, y = pl.collect_all([df.select(open_rings_expr), df.select(self.label_col)])
+        X = X.to_numpy()
+        y = y.to_numpy().flatten()
         return X, y
 
-    def train_dataloader(self):
+    def train_dataloader(self, batch_size: int):
         from torch.utils.data import DataLoader
 
+        open_rings_expr, features = self.open_rings_expr()
         train_df = (
             self.train_df()
+            .select(*open_rings_expr, self.label_col)
             .collect()
-            .to_torch(
-                "dataset",
-                label=self.LABEL_COL,
-            )
+            .to_torch("dataset", label=self.label_col, features=features)
         )
-        return DataLoader(train_df, batch_size=self.batch_size, shuffle=True)
+        return DataLoader(train_df, batch_size=batch_size, shuffle=True)
 
     def val_df(self) -> pl.LazyFrame:
         return self.get_fold_data("val")
 
     def val_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("val")
-    
+
     def val_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
         return self.get_sample_weights("val").collect().to_numpy().flatten()
 
     def val_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
-        val_df = self.val_df().collect()
-        X = val_df.drop(self.LABEL_COL).to_numpy()
-        y = val_df.select(self.LABEL_COL).to_numpy().flatten()
+        df = self.val_df()
+        open_rings_expr, _ = self.open_rings_expr()
+        X, y = pl.collect_all([df.select(open_rings_expr), df.select(self.label_col)])
+        X = X.to_numpy()
+        y = y.to_numpy().flatten()
         return X, y
 
-    def val_dataloader(self):
+    def val_dataloader(self, batch_size: int):
         from torch.utils.data import DataLoader
-
+        open_rings_expr, features = self.open_rings_expr()
         val_df = (
             self.val_df()
+            .select(*open_rings_expr, self.label_col)
             .collect()
-            .to_torch(
-                "dataset",
-                label=self.LABEL_COL,
-            )
+            .to_torch("dataset", label=self.label_col, features=features)
         )
-        return DataLoader(val_df, batch_size=self.batch_size, shuffle=False)
+        return DataLoader(val_df, batch_size=batch_size, shuffle=False)
 
     def test_df(self) -> pl.LazyFrame:
         return self.get_fold_data("test")
 
     def test_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("test")
-    
+
     def test_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
         return self.get_sample_weights("test").collect().to_numpy().flatten()
 
     def test_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
-        test_df = self.test_df().collect()
-        X = test_df.drop(self.LABEL_COL).to_numpy()
-        y = test_df.select(self.LABEL_COL).to_numpy().flatten()
+        df = self.test_df()
+        open_rings_expr, _ = self.open_rings_expr()
+        X, y = pl.collect_all([df.select(open_rings_expr), df.select(self.label_col)])
+        X = X.to_numpy()
+        y = y.to_numpy().flatten()
         return X, y
 
-    def test_dataloader(self):
+    def test_dataloader(self, batch_size: int):
         from torch.utils.data import DataLoader
-
+        open_rings_expr, features = self.open_rings_expr()
         test_df = (
             self.test_df()
+            .select(*open_rings_expr, self.label_col)
             .collect()
-            .to_torch(
-                "dataset",
-                label=self.LABEL_COL,
-            )
+            .to_torch("dataset", label=self.label_col, features=features)
         )
-        return DataLoader(test_df, batch_size=self.batch_size, shuffle=False)
+        return DataLoader(test_df, batch_size=batch_size, shuffle=False)
 
     def predict_class_weights(self) -> dict[int, float]:
         return self.get_class_weights("predict")
-    
+
     def predict_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
         return self.get_sample_weights("predict").collect().to_numpy().flatten()
 
     def predict_numpy(self) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.integer]]:
-        predict_df = self.predict_df().collect()
-        X = predict_df.drop(self.LABEL_COL).to_numpy()
-        y = predict_df.select(self.LABEL_COL).to_numpy().flatten()
+        df = self.predict_df()
+        open_rings_expr, _ = self.open_rings_expr()
+        X, y = pl.collect_all([df.select(open_rings_expr), df.select(self.label_col)])
+        X = X.to_numpy()
+        y = y.to_numpy().flatten()
         return X, y
 
     def predict_df(self) -> pl.LazyFrame:
         return self.get_fold_data("predict")
 
-    def predict_dataloader(self):
+    def predict_dataloader(self, batch_size: int):
         from torch.utils.data import DataLoader
-
+        open_rings_expr, features = self.open_rings_expr()
         predict_df = (
             self.predict_df()
+            .select(*open_rings_expr, self.label_col)
             .collect()
-            .to_torch(
-                "dataset",
-                label=self.LABEL_COL,
-            )
+            .to_torch("dataset", label=self.label_col, features=features)
         )
-        return DataLoader(predict_df, batch_size=self.batch_size, shuffle=False)
+        return DataLoader(predict_df, batch_size=batch_size, shuffle=False)

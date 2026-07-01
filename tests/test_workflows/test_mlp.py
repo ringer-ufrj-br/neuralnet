@@ -162,13 +162,7 @@ def ringer_dataset(test_data_dir: Path):
         rings_col="TrigEMClusterContainer.ringsE",
         kfold_table="standard_binning_kfold.parquet",
         label_col="label",
-        fold_col="kfold",
-        et_col="TrigEMClusterContainer.et",
-        eta_col="TrigEMClusterContainer.eta",
-        et_bin=Bin(low=15000.0, high=20000.0),
-        eta_bin=EtaBin(low=0.0, high=0.8),
-        ring_fraction=2,
-        batch_size=32,
+        fold_col="kfold"
     )
 
 
@@ -178,7 +172,7 @@ def test_dataset_numpy(ringer_dataset, split: str):
     X, y = method()
     assert isinstance(X, np.ndarray)
     assert isinstance(y, np.ndarray)
-    assert X.shape[1] == 50
+    assert X.shape[1] == 100
     assert len(X) == len(y)
 
 
@@ -187,7 +181,7 @@ def test_dataset_dataloader(ringer_dataset, split: str):
     import torch
 
     method = getattr(ringer_dataset, f"{split}_dataloader")
-    dl = method()
+    dl = method(batch_size=32)
     batch = next(iter(dl))
 
     assert isinstance(batch, (list, tuple))
@@ -198,6 +192,40 @@ def test_dataset_dataloader(ringer_dataset, split: str):
 
     assert isinstance(dataset_tensor, torch.Tensor)
     assert isinstance(label_tensor, torch.Tensor)
-    assert dataset_tensor.shape[1] == 50
+    assert dataset_tensor.shape[1] == 100
     assert dataset_tensor.shape[0] <= 32
     assert label_tensor.shape[0] == dataset_tensor.shape[0]
+
+
+# def test_cli_inference_loads_yaml_and_submits(isolated_executor):
+#     future = isolated_executor.submit(
+#         cli_inference_loads_yaml_and_submits_routine,
+#     )
+#     future.result()
+
+
+# def cli_inference_loads_yaml_and_submits_routine():
+#     import os
+
+#     os.environ["KERAS_BACKEND"] = "tensorflow"
+#     from neuralnet.workflows.mlp import cli as mlp_cli
+
+#     config_path = Path("/home/lucasbanunes/data/neuralnet_jobs/mlp/inference.yaml")
+#     mlp_cli.inference(config=config_path)
+
+
+def test_cli_uniform_ptq_inference_loads_yaml_and_submits(isolated_executor):
+    future = isolated_executor.submit(
+        cli_uniform_ptq_inference_loads_yaml_and_submits_routine,
+    )
+    future.result()
+
+
+def cli_uniform_ptq_inference_loads_yaml_and_submits_routine():
+    import os
+
+    os.environ["KERAS_BACKEND"] = "tensorflow"
+    from neuralnet.workflows.mlp import cli as mlp_cli
+
+    config_path = Path("/home/lucasbanunes/data/neuralnet_jobs/mlp/ptq_inference.yaml")
+    mlp_cli.uniform_ptq_inference(config=config_path)

@@ -40,25 +40,3 @@ class ParquetDataset(BaseModel):
             for table in self.dataset_dir.glob("*.parquet")
         }
         return pl.SQLContext(**dataframes)
-
-
-# app = typer.Typer()
-
-
-# @app.command()
-# def print_schema(
-#     dataset_dir: Annotated[
-#         Path,
-#         typer.Option("--dataset-dir", help="Directory containing the dataset files"),
-#     ],
-# ):
-#     dataset = ParquetDataset(dataset_dir=dataset_dir)
-#     for table in dataset_dir.glob("*.parquet"):
-#         with duckdb.connect(":memory:") as conn:
-#             res = conn.execute(
-#                 f"DESCRIBE SELECT * FROM read_parquet('{str(dataset.get_table_glob(table.name))}')"
-#             ).fetch_df()
-#         print(20 * "-")
-#         print(f"Schema for {table.name}:")
-#         print(res.to_string())
-#         print(20 * "-")
