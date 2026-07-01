@@ -101,14 +101,7 @@ class BinnedModel(BaseModel):
     decision_threshold: Annotated[
         float,
         Field(description="Decision threshold for the binary classification model."),
-    ]
-    fold: int | None = None
-    fold_col: Annotated[
-        str | None,
-        Field(
-            description="Name of the column in the DataFrame that indicates the fold for cross-validation. If None, no fold filtering is applied."
-        ),
-    ] = None
+    ] = 0.5
 
     def row_filter_expr(self) -> pl.Expr:
         expr = self.bins[0].as_polars_expr()
@@ -120,19 +113,6 @@ class BinnedModel(BaseModel):
         data = np.stack(batch.to_numpy())
         prediction = self.predict_numpy(data)
         return pl.Series(prediction.flatten(), dtype=pl.Float32)
-
-    @cached_property
-    def fold_col_expr(self) -> pl.Expr | None:
-        if self.fold_col is None or self.fold is None:
-            return None
-        return (
-            pl.when(self.fold_col == self.fold)
-            .then(True)
-            .when(self.fold_col.is_null())
-            .then(None)
-            .otherwise(False)
-            .alias("is_val_dataset")
-        )
 
     def validate_schema(self, df: PolarsFrame) -> None:
         """
@@ -148,27 +128,22 @@ class BinnedModel(BaseModel):
         if "id" not in schema:
             raise ValueError("DataFrame must contain an 'id' column for prediction.")
 
+        features_exceptions = []
         for feature in self.features:
             if feature not in schema:
-                raise TypeError(
+                exc = TypeError(
                     f"Feature '{feature}' is missing from the DataFrame. Required features: {self.features}"
                 )
+                features_exceptions.append(exc)
+                continue
             if not schema[feature].is_float():
-                raise TypeError(
+                exc = TypeError(
                     f"Feature '{feature}' must be of type float, but got {schema[feature]}"
                 )
+                features_exceptions.append(exc)
 
-        if self.fold_col is None:
-            return
-
-        if self.fold_col not in schema:
-            raise TypeError(
-                f"Fold column '{self.fold_col}' is missing from the DataFrame. Required fold column: {self.fold_col}"
-            )
-        if not (schema[self.fold_col].is_integer() or schema[self.fold_col].is_float()):
-            raise TypeError(
-                f"Fold column '{self.fold_col}' must be of type int, but got {schema[self.fold_col]}"
-            )
+        if features_exceptions:
+            raise ExceptionGroup("Errors in DataFrame schema features validation", features_exceptions)
 
     def predict_numpy(
         self, data: np.ndarray, batch_size: int = 32
@@ -198,36 +173,43 @@ class BinnedModel(BaseModel):
             layer_predictions = [layer_predictions]
         return layer_predictions, output_names
 
+    def get_empty_output(self, is_lazy: bool) -> pl.DataFrame | pl.LazyFrame:
+        """
+        Returns an empty DataFrame with the same schema as the output of the model's predict method.
+        """
+        schema = {
+            "id": pl.Int64,
+            **{feature: pl.Float32 for feature in self.features},
+            "prediction": pl.Boolean,
+            "output": pl.Float32,
+        }
+        if is_lazy:
+            return pl.LazyFrame(schema=schema)
+        else:
+            return pl.DataFrame(schema=schema)
+
     def predict_polars(
         self,
         data: pl.DataFrame | pl.LazyFrame,
         batch_size: int = 32,
-        output_layers: bool = False,
+        all_layers: bool = False,
+        join_results: bool = False,
     ) -> pl.DataFrame:
         logger = logging.getLogger()
         selection = [pl.col("id")] + [pl.col(feature) for feature in self.features]
-        if self.fold_col_expr is not None:
-            selection.append(self.fold_col_expr)
         filtered = data.filter(self.row_filter_expr()).select(*selection)
 
         self.validate_schema(filtered)
+        is_lazy = isinstance(filtered, pl.LazyFrame)
 
-        if isinstance(filtered, pl.LazyFrame):
+        if is_lazy:
             filtered = filtered.collect()
 
         if filtered.is_empty():
             logger.warning(
                 f"No data points found for the given bins ({self.bins}) and features ({self.features}.) Returning empty DataFrame."
             )
-            filtered.clear()  # Frees memory premptively
-            del filtered
-            return pl.DataFrame(schema=filtered.schema)
-
-        if self.fold_col_expr is not None:
-            is_val_dataset = (
-                filtered.select(pl.col("is_val_dataset")).to_numpy().flatten()
-            )
-            filtered = filtered.drop(pl.col("is_val_dataset"))
+            return self.get_empty_output(is_lazy)
 
         features = filtered.select(pl.exclude("id")).to_numpy()
         result = filtered.drop(pl.exclude("id"))
@@ -247,7 +229,7 @@ class BinnedModel(BaseModel):
             result = result.with_columns(pl.Series(output).alias("output"))
         del output
 
-        if output_layers:
+        if all_layers:
             layer_outputs, layer_names = self.all_layers_predict_numpy(
                 features, batch_size
             )
@@ -259,25 +241,34 @@ class BinnedModel(BaseModel):
                             f"layer.{layer_name}.{output_idx}"
                         )
                     )
-        else:
-            del features  # Frees memory premptively
 
-        if self.fold_col_expr is not None:
-            result = result.with_columns(
-                pl.Series(is_val_dataset).alias("is_val_dataset")
-            )
+        if is_lazy:
+            result = result.lazy()
+
+        if join_results:
+            result = data.join(result, on="id", how="left")
+
         return result
 
     @overload
     def predict(self, data: pl.DataFrame, batch_size: int = 32) -> pl.DataFrame: ...
 
     @overload
-    def predict(self, data: pl.LazyFrame, batch_size: int = 32) -> pl.DataFrame: ...
+    def predict(self, data: pl.LazyFrame, batch_size: int = 32) -> pl.LazyFrame: ...
 
-    def predict(self, data, batch_size: int = 32, output_layers: bool = False):
+    def predict(
+        self,
+        data,
+        batch_size: int = 32,
+        all_layers: bool = False,
+        join_results: bool = False,
+    ):
         if isinstance(data, (pl.DataFrame, pl.LazyFrame)):
             return self.predict_polars(
-                data, batch_size=batch_size, output_layers=output_layers
+                data,
+                batch_size=batch_size,
+                all_layers=all_layers,
+                join_results=join_results,
             )
         else:
             raise TypeError(
@@ -318,13 +309,23 @@ class BinnedCommittee:
     ) -> pl.DataFrame: ...
 
     def predict_polars(
-        self, data: pl.LazyFrame | pl.DataFrame, batch_size: int = 32
+        self,
+        data: pl.LazyFrame | pl.DataFrame,
+        batch_size: int = 32,
+        all_layers: bool = False,
+        join_results: bool = False,
     ) -> pl.DataFrame:
         prediction_df = []
         for model in self.models:
-            prediction = model.predict(data, batch_size=batch_size)
+            prediction = model.predict(
+                data, batch_size=batch_size, all_layers=all_layers
+            )
             prediction_df.append(prediction)
-        return pl.concat(prediction_df)
+        results = pl.concat(prediction_df)
+        del prediction_df
+        if join_results:
+            results = data.join(results, on="id", how="left")
+        return results
 
     @overload
     def predict(self, data: pl.DataFrame, batch_size: int = 32) -> pl.DataFrame: ...
