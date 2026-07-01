@@ -180,13 +180,21 @@ class RingerParquetDataset(ParquetDataset):
         fold_col = pl.col(self.fold_col)
         fold_df = self.get_dataframe(self.kfold_table)
         fold = pl.lit(self.fold, dtype=pl.dtype_of(fold_col))
+        is_test_col = label.is_not_null() & fold_col.is_not_null()
+        is_val_col = label.is_not_null() & fold_col == fold
+        is_train_col = label.is_not_null() & fold_col != fold
+        fold_df = fold_df.with_columns(
+            is_test_col.alias("is_test"),
+            is_val_col.alias("is_val"),
+            is_train_col.alias("is_train"),
+        )
         match group:
             case "train":
-                fold_df = fold_df.filter((label.is_not_null()) & (fold_col != fold))
+                fold_df = fold_df.filter(pl.col("is_train"))
             case "val":
-                fold_df = fold_df.filter((label.is_not_null()) & (fold_col == fold))
+                fold_df = fold_df.filter(pl.col("is_val"))
             case "test":
-                fold_df = fold_df.filter(label.is_not_null())
+                fold_df = fold_df.filter(pl.col("is_test"))
             case "predict":
                 pass
             case _:
