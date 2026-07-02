@@ -104,7 +104,8 @@ def evaluation_routine(
     verbose: VerboseType = 1,
     batch_size: int | None = None,
 ) -> StandardEvaluationDict:
-    logger = logging.getLogger("neuralnet")
+    from ... import get_logger
+    logger = get_logger()
     if metrics is None:
         metrics = []
 

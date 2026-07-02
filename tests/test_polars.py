@@ -24,7 +24,7 @@ def test_alternative_norm1_normalizes_list_column_with_default_output_name():
         }
     )
 
-    transform = AlternativeNorm1(input_col="rings")
+    transform = AlternativeNorm1(input_col="rings", output_col_base="rings_alternative_norm1")
 
     result = transform(data)
 
@@ -71,8 +71,8 @@ def test_fixed_point_quantized_alternative_norm1_quantizes_dataframe_and_lazyfra
 ):
     quantizer = FixedPointQuantizer(integer_bits=1, fractional_bits=2)
     transform = FixedPointQuantizedAlternativeNorm1(
-        input_col="rings",
-        output_col="rings_quantized",
+        input_col=["rings"],
+        output_col_base="rings_quantized",
         quantizer=quantizer,
     )
     if dtype == 'array':

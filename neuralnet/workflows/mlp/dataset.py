@@ -1,65 +1,28 @@
-from typing import Annotated, Any, Literal, ClassVar
+from typing import Annotated, Literal, ClassVar
 from pydantic import (
     ConfigDict,
-    Field,
-    BaseModel,
-    PrivateAttr,
-    field_serializer,
-    BeforeValidator,
+    Field
 )
 import polars as pl
 import numpy as np
 import numpy.typing as npt
 from ...datasets import ParquetDataset
+from ...models.binned_committee import VariableBin, Infinityvalidator
 from ... import get_logger
 
 
-def infinity_validator(value: Any) -> float:
-    if value == "inf" or value == "Infinity":
-        return float("inf")
-    elif value == "-inf" or value == "-Infinity":
-        return float("-inf")
-    return float(value)
-
-
-Infinityvalidator = BeforeValidator(infinity_validator)
-
-
-class Bin(BaseModel):
-    low: Annotated[
-        float, Field(..., description="Lower bound of the bin"), Infinityvalidator
-    ]
-    high: Annotated[
-        float, Field(..., description="Upper bound of the bin"), Infinityvalidator
-    ]
-    closed: Literal["left", "right"] = Field(
-        "left",
-        description='Whether the bin is closed on the "left" or "right".',
-    )
-
-    def model_post_init(self, context):
-        if self.low >= self.high:
-            raise ValueError(
-                f"Bin lower bound must be less than upper bound. Got low={self.low} and high={self.high}."
-            )
-        return super().model_post_init(context)
-
-    @field_serializer("low", "high")
-    def serialize_bound(self, value: float) -> str | float:
-        if value == float("inf"):
-            return "Infinity"
-        if value == float("-inf"):
-            return "-Infinity"
-        return value
-
-
-class EtaBin(Bin):
+class AbsoluteBin(VariableBin):
     low: Annotated[
         float, Field(..., ge=0, description="Lower bound of the bin"), Infinityvalidator
     ]
     high: Annotated[
         float, Field(..., ge=0, description="Upper bound of the bin"), Infinityvalidator
     ]
+
+    def as_polars_expr(self) -> pl.Expr:
+        return pl.col(self.var_name).abs().is_between(
+            self.lower, self.upper, closed=self.closed
+        )
 
 
 type BatchSizeType = Annotated[
@@ -94,14 +57,17 @@ type EtColType = Annotated[
     str, Field(description="Name of the et column in the data table")
 ]
 
-type EtBinType = Annotated[Bin | None, Field(description="Definition of the et bin")]
+type EtBinType = Annotated[
+    VariableBin | None,
+    Field(description="Definition of the et bin")
+]
 
 type EtaColType = Annotated[
     str, Field(description="Name of the eta column in the data table")
 ]
 
 type EtaBinType = Annotated[
-    EtaBin | None, Field(description="Definition of the eta bin")
+    AbsoluteBin | None, Field(description="Definition of the eta bin")
 ]
 
 type RingFractionType = Annotated[
@@ -147,9 +113,10 @@ class RingerParquetDataset(ParquetDataset):
     kfold_table: KFoldTableType
     label_col: LabelColType = "label"
     fold_col: FoldColType = "kfold"
-    fold: int = Field(0, description="Fold number to use for training.", ge=0)
+    fold: Annotated[int, Field(description="Fold number to use for training.", ge=0)] = 0
 
-    _fold: int = PrivateAttr(0)
+    et_bin: EtBinType = None
+    eta_bin: EtaBinType = None
 
     def get_n_folds(self) -> int:
         n_folds = (
@@ -173,8 +140,6 @@ class RingerParquetDataset(ParquetDataset):
 
 
     def get_fold_data(self, group: DataGroupType) -> pl.LazyFrame:
-
-        data_df = self.get_dataframe(self.data_table)
 
         label = pl.col(self.label_col)
         fold_col = pl.col(self.fold_col)
@@ -202,6 +167,11 @@ class RingerParquetDataset(ParquetDataset):
                     f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'."
                 )
 
+        data_df = self.get_dataframe(self.data_table)
+        if self.et_bin is not None:
+            data_df = self.et_bin.is_inside_polars(data_df)
+        if self.eta_bin is not None:
+            data_df = self.eta_bin.is_inside_polars(data_df)
         return_df = data_df.join(fold_df, on="id", how="inner")
 
         return return_df

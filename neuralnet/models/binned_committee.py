@@ -1,6 +1,13 @@
 from typing import Any, Annotated, Self, Literal, overload
 import polars as pl
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, TYPE_CHECKING
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TYPE_CHECKING,
+    field_serializer,
+)
 import numpy as np
 import logging
 from functools import cached_property
@@ -14,35 +21,44 @@ if TYPE_CHECKING:
 type QuantizerConfigType = "QuantizerConfig" | None
 
 
+def infinity_validator(value: Any) -> float:
+    if value == "inf" or value == "Infinity":
+        return float("inf")
+    elif value == "-inf" or value == "-Infinity":
+        return float("-inf")
+    return float(value)
+
+
+Infinityvalidator = BeforeValidator(infinity_validator)
+
+
 class VariableBin(BaseModel):
     var_name: Annotated[
         str, Field(description="Name of the variable used in the binning.")
     ]
-    lower: Annotated[float, Field(description="Lower bound of the bin.")]
-    upper: Annotated[float, Field(description="Upper bound of the bin.")]
+    low: Annotated[
+        float, Field(..., description="Lower bound of the bin"), Infinityvalidator
+    ]
+    high: Annotated[
+        float, Field(..., description="Upper bound of the bin"), Infinityvalidator
+    ]
     closed: Annotated[
         Literal["left", "right", "both", "none"],
         Field(
             description="Indicates whether the bin is closed on the left, right, both, or neither side."
         ),
-    ] = "left"
+    ]
 
-    def is_inside_numpy(self, value):
-        if self.closed == "left":
-            return self.lower <= value < self.upper
-        elif self.closed == "right":
-            return self.lower < value <= self.upper
-        elif self.closed == "both":
-            return self.lower <= value <= self.upper
-        elif self.closed == "none":
-            return self.lower < value < self.upper
-        else:
-            raise ValueError(f"Invalid closed value: {self.closed}")
+    @field_serializer("low", "high")
+    def serialize_bound(self, value: float) -> str | float:
+        if value == float("inf"):
+            return "Infinity"
+        if value == float("-inf"):
+            return "-Infinity"
+        return value
 
     def as_polars_expr(self) -> pl.Expr:
-        return pl.col(self.var_name).is_between(
-            self.lower, self.upper, closed=self.closed
-        )
+        return pl.col(self.var_name).is_between(self.low, self.high, closed=self.closed)
 
     @overload
     def apply_bin(self, df: pl.DataFrame) -> pl.DataFrame: ...
@@ -143,7 +159,9 @@ class BinnedModel(BaseModel):
                 features_exceptions.append(exc)
 
         if features_exceptions:
-            raise ExceptionGroup("Errors in DataFrame schema features validation", features_exceptions)
+            raise ExceptionGroup(
+                "Errors in DataFrame schema features validation", features_exceptions
+            )
 
     def predict_numpy(
         self, data: np.ndarray, batch_size: int = 32

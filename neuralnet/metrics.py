@@ -50,7 +50,9 @@ class EnhancedConfusionMatrixDict(TypedDict):
     max_sp: MaxSPDict
 
 
-def enhanced_confusion_matrix_numpy(y_true, y_pred) -> EnhancedConfusionMatrixDict:
+def enhanced_confusion_matrix_from_preds(
+    y_true: Numpy1DFloatArray, y_pred: Numpy1DFloatArray
+) -> EnhancedConfusionMatrixDict:
     from sklearn.metrics import confusion_matrix_at_thresholds
 
     cm: tuple[

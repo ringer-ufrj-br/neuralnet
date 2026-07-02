@@ -47,40 +47,96 @@ type PolarsFrame = pl.DataFrame | pl.LazyFrame
 class AlternativeNorm1(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    input_col: PolarsExpression
-    output_col: Annotated[str | None, Field(default=None)]
-
-    def model_post_init(self, __context) -> None:
-        if self.output_col is None:
-            self.output_col = f"{self.input_col.meta.output_name()}_alternative_norm1"
+    input_col: Annotated[
+        list[str],
+        Field(
+            description="Name of the input column containing the rings data.",
+            min_length=1,
+        ),
+    ]
+    output_col_base: Annotated[
+        str,
+        Field(
+            description="Base name for the output column containing the normalized rings data."
+        ),
+    ]
 
     @cached_property
-    def list_polars_expr(self) -> pl.Expr:
-        norms = self.input_col.list.sum()
-        norms = pl.when(norms == 0).then(1).otherwise(norms)
-        return (self.input_col / norms).alias(self.output_col)
-    
-    @cached_property
-    def arr_polars_expr(self) -> pl.Expr:
-        norms = self.input_col.arr.sum()
-        norms = pl.when(norms == 0).then(1).otherwise(norms)
-        return (self.input_col / norms).alias(self.output_col)
-    
-    def get_expr(self, data: pl.DataFrame | pl.LazyFrame) -> pl.Expr:
-        if isinstance(data, pl.DataFrame):
-            schema = data.schema
-        elif isinstance(data, pl.LazyFrame):
-            schema = data.collect_schema()
+    def output_cols(self) -> list[str]:
+        if len(self.input_col) == 1:
+            return [self.output_col_base]
         else:
-            raise TypeError(f"Expected pl.DataFrame or pl.LazyFrame, got {type(data)}")
-        
-        col_dtype = schema[self.input_col.meta.output_name()]
-        if isinstance(col_dtype, pl.List):
-            return self.list_polars_expr
-        elif isinstance(col_dtype, pl.Array):
-            return self.arr_polars_expr
+            return [
+                self.get_expanded_column_name(i) for i in range(len(self.input_col))
+            ]
+
+    def get_expanded_column_name(self, i: int) -> str:
+        return f"{self.output_col_base}.{i}"
+
+    def get_list_polars_expr(self) -> list[pl.Expr]:
+        col = pl.col(self.input_col[0])
+        norms = col.list.sum().abs()
+        norms = pl.when(norms == 0).then(1).otherwise(norms)
+        return [(col / norms).alias(self.output_col_base)]
+
+    def get_arr_polars_expr(self) -> list[pl.Expr]:
+        col = pl.col(self.input_col[0])
+        norms = col.arr.sum().abs()
+        norms = pl.when(norms == 0).then(1).otherwise(norms)
+        return [(col / norms).alias(self.output_col_base)]
+
+    def get_float_polars_expr(self) -> list[pl.Expr]:
+        norms = pl.sum_horizontal(*self.input_col).abs()
+        norms = pl.when(norms == 0).then(1).otherwise(norms)
+        return [
+            pl.col(col_name).truediv(norms).alias(self.get_expanded_column_name(i))
+            for i, col_name in enumerate(self.input_col)
+        ]
+
+    def get_expr(self, df: pl.DataFrame | pl.LazyFrame) -> list[pl.Expr]:
+
+        if isinstance(df, pl.DataFrame):
+            schema = df.schema
+        elif isinstance(df, pl.LazyFrame):
+            schema = df.collect_schema()
         else:
-            raise TypeError(f"Expected list or array column, got {col_dtype}")
+            raise TypeError(f"Expected pl.DataFrame or pl.LazyFrame, got {type(df)}")
+
+        if len(self.input_col) == 1:
+            col_name = self.input_col[0]
+            if col_name not in schema:
+                raise ValueError(
+                    f"Input column '{col_name}' not found in DataFrame schema."
+                )
+            col_dtype = schema[col_name]
+            if (
+                not isinstance(col_dtype, (pl.List, pl.Array))
+                or not col_dtype.inner.is_float()
+            ):
+                raise TypeError(
+                    f"Expected list or array column floats for '{col_name}', got {col_dtype}"
+                )
+            elif isinstance(col_dtype, pl.List):
+                return self.get_list_polars_expr()
+            elif isinstance(col_dtype, pl.Array):
+                return self.get_arr_polars_expr()
+            else:
+                raise TypeError(
+                    f"Expected list or array column for '{col_name}', got {col_dtype}"
+                )
+
+        for col_name in self.input_col:
+            if col_name not in schema:
+                raise ValueError(
+                    f"Input column '{col_name}' not found in DataFrame schema."
+                )
+            col_dtype = schema[col_name]
+            if not col_dtype.is_float():
+                raise TypeError(
+                    f"Expected floating type for '{col_name}', got {col_dtype}"
+                )
+
+        return self.get_float_polars_expr()
 
     @overload
     def __call__(self, data: pl.DataFrame) -> pl.DataFrame: ...
@@ -92,7 +148,7 @@ class AlternativeNorm1(BaseModel):
         self, data: pl.DataFrame | pl.LazyFrame
     ) -> pl.DataFrame | pl.LazyFrame:
         expr = self.get_expr(data)
-        return data.with_columns(expr)
+        return data.with_columns(*expr)
 
     def fixed_point_quantization(
         self, quantizer: FixedPointQuantizer
@@ -107,17 +163,26 @@ class FixedPointQuantizedAlternativeNorm1(AlternativeNorm1):
         description="Fixed-point quantizer configuration."
     )
 
-    @cached_property
-    def list_polars_expr(self) -> pl.Expr:
-        return super().list_polars_expr.list.eval(
+    def get_list_polars_expr(self) -> list[pl.Expr]:
+        orig_expr = super().get_list_polars_expr()[0]
+        new_expr = orig_expr.list.eval(
             pl.element().pipe(self.quantizer.quantize_polars_expr)
         )
+        return [new_expr]
 
-    @cached_property
-    def arr_polars_expr(self) -> pl.Expr:
-        return super().arr_polars_expr.arr.eval(
+    def get_arr_polars_expr(self) -> list[pl.Expr]:
+        orig_expr = super().get_arr_polars_expr()[0]
+        new_expr = orig_expr.arr.eval(
             pl.element().pipe(self.quantizer.quantize_polars_expr)
         )
+        return [new_expr]
+
+    def get_float_polars_expr(self) -> list[pl.Expr]:
+        orig_exprs = super().get_float_polars_expr()
+        new_exprs = [
+            expr.pipe(self.quantizer.quantize_polars_expr) for expr in orig_exprs
+        ]
+        return new_exprs
 
     @overload
     def __call__(self, data: pl.DataFrame) -> pl.DataFrame: ...
@@ -130,39 +195,3 @@ class FixedPointQuantizedAlternativeNorm1(AlternativeNorm1):
     ) -> pl.DataFrame | pl.LazyFrame:
         expr = self.get_expr(data)
         return data.with_columns(expr)
-
-
-class RingSlicesPerLayer(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-
-    fraction: Annotated[int, Field(gt=0, description="Fraction of rings to select per layer.")]
-    to_array: Annotated[
-        bool,
-        Field(default=False, description="Whether to convert the list to an array after gathering.")
-    ]
-
-    input_col: PolarsExpression
-    output_col: Annotated[str | None, Field(default=None)]
-
-    def model_post_init(self, __context) -> None:
-        if self.output_col is None:
-            self.output_col = f"{self.input_col.meta.output_name()}_slices_per_layer"
-
-    @cached_property
-    def polars_expr(self) -> pl.Expr:
-        idxs = get_ring_slices_per_layer(self.fraction)
-        result = self.input_col.list.gather(idxs).alias(self.output_col)
-        if self.to_array:
-            result = result.list.to_array(len(idxs))
-        return result
-
-    @overload
-    def __call__(self, data: pl.DataFrame) -> pl.DataFrame: ...
-
-    @overload
-    def __call__(self, data: pl.LazyFrame) -> pl.LazyFrame: ...
-
-    def __call__(
-        self, data: pl.DataFrame | pl.LazyFrame
-    ) -> pl.DataFrame | pl.LazyFrame:
-        return data.with_columns(self.polars_expr)
