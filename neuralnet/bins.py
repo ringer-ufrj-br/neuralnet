@@ -1,6 +1,9 @@
+from functools import cached_property
 from typing import Any, Literal, TypedDict, overload, Annotated
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer
 import polars as pl
+import numpy as np
+from .numpy import Numpy1DFloatArray
 
 
 def infinity_validator(value: Any) -> float:
@@ -82,11 +85,31 @@ class Bin(BaseModel):
     def as_polars_expr(self, name: str) -> "pl.Expr":
         return pl.col(name).is_between(self.low, self.high, closed=self.closed)
 
+    def sample(self, n_samples: int) -> Numpy1DFloatArray:
+        """
+        Sample values from the bin.
+
+        Args:
+            n_samples (int): Number of samples to draw.
+        """
+        if self.closed == "right" or self.closed == "none":
+            left_limit = np.nextafter(self.low, np.inf)
+        else:
+            left_limit = self.low
+
+        if self.closed == "left" or self.closed == "none":
+            right_limit = np.nextafter(self.high, -np.inf)
+        else:
+            right_limit = self.high
+
+        return np.random.uniform(left_limit, right_limit, size=n_samples)
+
 
 class BinDict(TypedDict):
     low: BinLowType
     high: BinHighType
     closed: BinClosedType
+
 
 type AbsoluteBinLowType = Annotated[
     float,
@@ -127,6 +150,7 @@ class AbsoluteBin(Bin):
 
     def as_polars_expr(self, name: str) -> "pl.Expr":
         return pl.col(name).abs().is_between(self.low, self.high, closed=self.closed)
+
 
 class AbsoluteBinDict(TypedDict):
     low: AbsoluteBinLowType

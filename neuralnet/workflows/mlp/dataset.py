@@ -2,9 +2,11 @@ from typing import Annotated, Literal, ClassVar
 from pydantic import ConfigDict, Field
 import polars as pl
 import numpy as np
+from pathlib import Path
+from itertools import product
 from ...datasets import ParquetDataset
 from ... import get_logger
-from ...bins import VariableBin, AbsoluteVariableBin
+from ...bins import VariableBin, AbsoluteVariableBin, BinDict, Bin
 
 
 type DataTableType = Annotated[
@@ -196,3 +198,58 @@ class RingerParquetDataset(ParquetDataset):
     def predict_df(self) -> pl.LazyFrame:
         return self.get_fold_data("predict")
 
+
+def generate_ringer_dataset_dfs(
+    et_bins: list[Bin | BinDict],
+    eta_bins: list[Bin | BinDict],
+    samples_per_bin: int = 1000,
+    n_folds: int = 5,
+    random_state: int = 42,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    from sklearn.datasets import make_blobs
+    for i in range(len(et_bins)):
+        et_bins[i] = et_bins[i] if isinstance(et_bins[i], Bin) else Bin(**et_bins[i])
+    for i in range(len(eta_bins)):
+        eta_bins[i] = eta_bins[i] if isinstance(eta_bins[i], Bin) else Bin(**eta_bins[i])
+    
+    final_data_df = []
+    final_kfold_df = []
+    id_starts = range(0, samples_per_bin * len(et_bins) * len(eta_bins), samples_per_bin)
+    iterator = zip(
+        id_starts,
+        product(et_bins, eta_bins),
+    )
+    for id_start, (et_bin, eta_bin) in iterator:
+
+        rings, labels = make_blobs(
+            n_samples=samples_per_bin,
+            n_features=RingerParquetDataset.N_RINGS,
+            centers=2,
+            cluster_std=0.1,
+            random_state=random_state,
+        )
+        rings = rings.astype(np.float32)
+        labels = labels.astype(np.bool_)
+        data_df = pl.DataFrame(
+            {
+                "id": np.arange(id_start, id_start + samples_per_bin, dtype=np.uint64),
+                "rings": [r for r in rings],
+                "et": et_bin.sample(samples_per_bin).astype(np.float32),
+                "eta": eta_bin.sample(samples_per_bin).astype(np.float32),
+            }
+        ).with_columns(pl.col("rings").cast(pl.List(pl.Float32)))
+        final_data_df.append(data_df)
+
+        kfold_df = pl.DataFrame(
+            {
+                "id": np.arange(id_start, id_start + samples_per_bin),
+                "label": labels.tolist(),
+                "fold": np.random.randint(0, n_folds, samples_per_bin).tolist(),
+            }
+        )
+        final_kfold_df.append(kfold_df)
+    
+    final_kfold_df = pl.concat(final_kfold_df)
+    final_data_df = pl.concat(final_data_df)
+
+    return final_data_df, final_kfold_df

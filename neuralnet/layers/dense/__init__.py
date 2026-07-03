@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Annotated, Literal
 from pydantic import Field, ConfigDict, BaseModel
 
 
@@ -24,6 +24,9 @@ class DenseFactory(BaseModel):
         "zeros",
         description="Initializer for the bias vector.",
     )
+    name: Annotated[
+        str | None, Field(description="Name of the dense layer. If not provided, a default name will be generated.")
+    ] = None
 
     def as_keras(self):
         from keras.layers import Dense
@@ -33,6 +36,7 @@ class DenseFactory(BaseModel):
             activation=self.activation,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
+            name=self.name
         )
 
 

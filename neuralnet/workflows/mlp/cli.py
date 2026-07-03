@@ -2,7 +2,7 @@ import typer
 from typing import Annotated
 from pathlib import Path
 from ...pydantic import pydantic_to_markdown_schema
-from .jobs import MLPKerasTrainingJob
+from .training import MLPKerasTrainingJob
 from .inference import InferenceJob, PTQConversionJob
 
 

@@ -173,15 +173,16 @@ class SelectionCriteria(BaseModel):
         description="How to select the best model from initilization or fold groups. Must be either 'max' or 'min'.",
     )
 
-    def filter_polars_expr(self, expr: pl.Expr) -> pl.Expr:
+    def select_best_expr(self) -> pl.Expr:
         if self.criterion == "max":
-            return expr.sort_by(self.key, descending=True).first()
+            return pl.all().sort_by(self.key, descending=True).first()
         elif self.criterion == "min":
-            return expr.sort_by(self.key, descending=False).first()
+            return pl.all().sort_by(self.key, descending=False).first()
         else:
             raise ValueError(
                 f"Invalid criterion: {self.criterion}. Must be either 'max' or 'min'."
             )
+
 
 
 type EtaBinIntervalValue = Annotated[
@@ -238,7 +239,7 @@ class PreprocessingPipeline(BaseModel):
         if norm_strategy == "l1":
             normalizer = AlternativeNorm1(
                 input_col=ring_selector.output_cols,
-                output_col=f"{rings_col}_normalized",
+                output_col_base=f"{rings_col}_normalized",
             )
         elif norm_strategy is None:
             normalizer = None
@@ -748,7 +749,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
         )
         del val_numpy
 
-        if not self.dry_run and hasattr(dataset, "test_numpy"):
+        if not self.dry_run and hasattr(dataset, "test_df"):
             test_numpy = self.get_numpy_data(dataset.test_df())
             results["test"] = self.run_evaluation(
                 model=model,
@@ -757,6 +758,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
                 if self.balance_class_weights
                 else None,
             )
+            del test_numpy
 
         logger.info(f"Finished evaluating for fold {fold} and init {init}")
         zip_path = self.get_member_results_path(output_dir)
@@ -837,13 +839,15 @@ class MLPKerasTrainingJob(YamlBaseModel):
             "eta_bin.high",
             "eta_bin.closed",
         ]
-        best_init_results = all_model_results_df.filter(
-            pl.col(self.best_init.key)
-            == pl.col(self.best_init.key).max().over((*bins_cols, "fold"))
+        best_init_results = (
+            all_model_results_df
+            .group_by(*bins_cols, "fold")
+            .agg(self.best_init.select_best_expr())
         )
-        selected_models = best_init_results.filter(
-            pl.col(self.best_fold.key)
-            == pl.col(self.best_fold.key).max().over(bins_cols)
+        selected_models = (
+            best_init_results
+            .group_by(*bins_cols)
+            .agg(self.best_fold.select_best_expr())
         )
         selected_models.write_parquet(self.selected_models_path)
 

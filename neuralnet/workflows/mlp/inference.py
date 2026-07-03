@@ -7,7 +7,7 @@ import json
 import polars as pl
 
 from ...submitit import ExecutorConfig
-from .jobs import MLPKerasTrainingJob
+from .training import MLPKerasTrainingJob
 from .dataset import (
     DataTableType,
     RingsColType,
