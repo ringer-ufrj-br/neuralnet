@@ -17,27 +17,28 @@ class RingSlicesPerLayer(BaseModel):
             description="Output format for the selected rings. Currently, only 'expanded_columns' is supported."
         ),
     ] = "expanded_columns"
-    input_col: Annotated[
+    rings_col: Annotated[
         str,
-        Field(
-            description="Name of the input column containing the list or array of rings."
-        ),
-    ]
-    output_col_base: Annotated[
-        str,
-        Field(
-            description="Name of the output column.",
-        ),
+        Field(description="Name of the column containing the list or array of rings."),
     ]
 
+    @cached_property
+    def input_cols(self) -> list[str]:
+        return [self.rings_col]
+
+    @cached_property
+    def output_cols(self) -> list[str]:
+        idxs = get_ring_slices_per_layer(self.fraction)
+        return [self.get_expanded_column_name(i) for i in idxs]
+
     def get_expanded_column_name(self, i: int) -> str:
-        return f"{self.output_col_base}.{i}"
+        return f"{self.rings_col}.{i}"
 
     def get_list_polars_expr(self) -> pl.Expr:
         idxs = get_ring_slices_per_layer(self.fraction)
         if self.output_format == "expanded_columns":
             cols = [
-                pl.col(self.input_col)
+                pl.col(self.rings_col)
                 .list.get(i)
                 .alias(self.get_expanded_column_name(i))
                 for i in idxs
@@ -50,7 +51,7 @@ class RingSlicesPerLayer(BaseModel):
         idxs = get_ring_slices_per_layer(self.fraction)
         if self.output_format == "expanded_columns":
             cols = [
-                pl.col(self.input_col)
+                pl.col(self.rings_col)
                 .arr.get(i)
                 .alias(self.get_expanded_column_name(i))
                 for i in idxs
@@ -59,19 +60,18 @@ class RingSlicesPerLayer(BaseModel):
         else:
             raise ValueError(f"Unsupported output_format: {self.output_format}")
 
-    @cached_property
-    def output_cols(self) -> list[str]:
-        idxs = get_ring_slices_per_layer(self.fraction)
-        return [self.get_expanded_column_name(i) for i in idxs]
+    @overload
+    def __call__(
+        self, data: pl.DataFrame, passthrough_previous: bool = False
+    ) -> pl.DataFrame: ...
 
     @overload
-    def __call__(self, data: pl.DataFrame) -> pl.DataFrame: ...
-
-    @overload
-    def __call__(self, data: pl.LazyFrame) -> pl.LazyFrame: ...
+    def __call__(
+        self, data: pl.LazyFrame, passthrough_previous: bool = False
+    ) -> pl.LazyFrame: ...
 
     def __call__(
-        self, data: pl.DataFrame | pl.LazyFrame
+        self, data: pl.DataFrame | pl.LazyFrame, passthrough_previous: bool = False
     ) -> pl.DataFrame | pl.LazyFrame:
         if isinstance(data, pl.DataFrame):
             schema = data.schema
@@ -80,72 +80,24 @@ class RingSlicesPerLayer(BaseModel):
         else:
             raise TypeError(f"Expected pl.DataFrame or pl.LazyFrame, got {type(data)}")
 
-        if self.input_col not in schema:
+        if self.rings_col not in schema:
             raise ValueError(
-                f"Input column '{self.input_col}' not found in the data schema."
+                f"Input column '{self.rings_col}' not found in the data schema."
             )
 
-        input_dtype = schema[self.input_col]
+        input_dtype = schema[self.rings_col]
         if isinstance(input_dtype, pl.List):
             polars_expr = self.get_list_polars_expr()
         elif isinstance(input_dtype, pl.Array):
             if not input_dtype.inner.is_float():
                 raise TypeError(
-                    f"Expected array of floats for column '{self.input_col}', got {input_dtype.inner}"
+                    f"Expected array of floats for column '{self.rings_col}', got {input_dtype.inner}"
                 )
             polars_expr = self.get_array_polars_expr()
         else:
             raise TypeError(f"Expected list or array column, got {input_dtype}")
 
-        return data.with_columns(polars_expr)
-
-
-class Open1DArray(BaseModel):
-    input_col: Annotated[
-        str,
-        Field(description="Name of the input column containing the data array."),
-    ]
-    output_col: Annotated[
-        str,
-        Field(
-            description="Name of the output column.",
-        ),
-    ]
-
-    @overload
-    def __call__(self, data: pl.DataFrame) -> pl.DataFrame: ...
-
-    @overload
-    def __call__(self, data: pl.LazyFrame) -> pl.LazyFrame: ...
-
-    def __call__(
-        self, data: pl.DataFrame | pl.LazyFrame
-    ) -> pl.DataFrame | pl.LazyFrame:
-        if isinstance(data, pl.DataFrame):
-            schema = data.schema
-        elif isinstance(data, pl.LazyFrame):
-            schema = data.collect_schema()
+        if passthrough_previous:
+            return data.with_columns(polars_expr)
         else:
-            raise TypeError(f"Expected pl.DataFrame or pl.LazyFrame, got {type(data)}")
-
-        if self.input_col not in schema:
-            raise ValueError(
-                f"Input column '{self.input_col}' not found in the data schema."
-            )
-
-        input_dtype = schema[self.input_col]
-        if not isinstance(input_dtype, pl.Array):
-            raise TypeError(
-                f"Expected array for column '{self.input_col}', got {input_dtype}"
-            )
-
-        if not isinstance(input_dtype.shape, int):
-            raise TypeError(
-                f"Expected 1D array for column '{self.input_col}', got {input_dtype.shape}"
-            )
-
-        return data.with_columns(
-            pl.col(self.input_col)
-            .arr.to_struct(fields=lambda idx: f"{self.output_col}.{idx}")
-            .alias(self.output_col)
-        ).unnest(self.output_col)
+            return data.select(polars_expr)
