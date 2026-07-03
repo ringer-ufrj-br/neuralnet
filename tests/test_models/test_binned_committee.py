@@ -136,17 +136,17 @@ def binned_model_predict_polars_with_all_layers_adds_layer_outputs(frame_factory
 
 
 @pytest.mark.parametrize("frame_factory", [make_dataframe, make_lazyframe])
-def test_binned_model_predict_polars_with_all_layers_and_join_results_adds_layer_outputs(
+def test_binned_model_predict_polars_with_all_layers_and_passthrough_adds_layer_outputs(
     frame_factory, isolated_executor
 ):
     future = isolated_executor.submit(
-        binned_model_predict_polars_with_all_layers_and_join_results_adds_layer_outputs,
+        binned_model_predict_polars_with_all_layers_and_passthrough_adds_layer_outputs,
         frame_factory=frame_factory,
     )
     future.result()
 
 
-def binned_model_predict_polars_with_all_layers_and_join_results_adds_layer_outputs(
+def binned_model_predict_polars_with_all_layers_and_passthrough_adds_layer_outputs(
     frame_factory,
 ):
     model = build_constant_binned_model()
@@ -160,7 +160,7 @@ def binned_model_predict_polars_with_all_layers_and_join_results_adds_layer_outp
     )
 
     result = collect_if_lazy(
-        model.predict_polars(data, all_layers=True, join_results=True)
+        model.predict_polars(data, all_layers=True, passthrough=True)
     )
 
     assert result.columns == [
@@ -189,17 +189,17 @@ def binned_model_predict_polars_with_all_layers_and_join_results_adds_layer_outp
 
 
 @pytest.mark.parametrize("frame_factory", [make_dataframe])
-def test_binned_model_predict_polars_with_join_results_adds_original_columns(
+def test_binned_model_predict_polars_with_passthrough_adds_original_columns(
     frame_factory, isolated_executor
 ):
     future = isolated_executor.submit(
-        binned_model_predict_polars_with_join_results_adds_original_columns,
+        binned_model_predict_polars_with_passthrough_adds_original_columns,
         frame_factory=frame_factory,
     )
     future.result()
 
 
-def binned_model_predict_polars_with_join_results_adds_original_columns(
+def binned_model_predict_polars_with_passthrough_adds_original_columns(
     frame_factory,
 ):
     model = build_constant_binned_model()
@@ -212,7 +212,7 @@ def binned_model_predict_polars_with_join_results_adds_original_columns(
         }
     )
 
-    result = collect_if_lazy(model.predict_polars(data, join_results=True))
+    result = collect_if_lazy(model.predict_polars(data, passthrough=True))
 
     assert result.columns == [
         "id",
@@ -289,27 +289,28 @@ def binned_committee_predict_concatenates_model_predictions(frame_factory):
             self.received_data = data
             return self.result
 
-    committee = BinnedCommittee.__new__(BinnedCommittee)
-    committee.models = [
-        FakeModel(
-            pl.DataFrame(
-                {
-                    "id": [1],
-                    "output": [0.1],
-                    "prediction": [False],
-                }
-            )
-        ),
-        FakeModel(
-            pl.DataFrame(
-                {
-                    "id": [2],
-                    "output": [0.9],
-                    "prediction": [True],
-                }
-            )
-        ),
-    ]
+    committee = BinnedCommittee(
+        models=[
+            FakeModel(
+                pl.DataFrame(
+                    {
+                        "id": [1],
+                        "output": [0.1],
+                        "prediction": [False],
+                    }
+                )
+            ),
+            FakeModel(
+                pl.DataFrame(
+                    {
+                        "id": [2],
+                        "output": [0.9],
+                        "prediction": [True],
+                    }
+                )
+            ),
+        ]
+    )
 
     data = frame_factory({"id": [1, 2], "x": [0.5, 0.6]})
     result = collect_if_lazy(committee.predict(data))
@@ -361,8 +362,9 @@ def binned_committee_predict_forwards_all_layers_and_joins_results(frame_factory
                 return result.lazy()
             return result
 
-    committee = BinnedCommittee.__new__(BinnedCommittee)
-    committee.models = [FakeModel([1], 0.1), FakeModel([4], 0.9)]
+    committee = BinnedCommittee(
+        [FakeModel([1], 0.1), FakeModel([4], 0.9)]
+    )
 
     data = frame_factory(
         {
@@ -374,7 +376,7 @@ def binned_committee_predict_forwards_all_layers_and_joins_results(frame_factory
     )
 
     result = collect_if_lazy(
-        committee.predict_polars(data, all_layers=True, join_results=True)
+        committee.predict_polars(data, all_layers=True, passthrough=True)
     )
 
     assert result.columns == [

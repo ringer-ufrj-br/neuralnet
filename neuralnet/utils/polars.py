@@ -62,16 +62,16 @@ class RingSlicesPerLayer(BaseModel):
 
     @overload
     def __call__(
-        self, data: pl.DataFrame, passthrough_previous: bool = False
+        self, data: pl.DataFrame, passthrough: bool = False
     ) -> pl.DataFrame: ...
 
     @overload
     def __call__(
-        self, data: pl.LazyFrame, passthrough_previous: bool = False
+        self, data: pl.LazyFrame, passthrough: bool = False
     ) -> pl.LazyFrame: ...
 
     def __call__(
-        self, data: pl.DataFrame | pl.LazyFrame, passthrough_previous: bool = False
+        self, data: pl.DataFrame | pl.LazyFrame, passthrough: bool = False
     ) -> pl.DataFrame | pl.LazyFrame:
         if isinstance(data, pl.DataFrame):
             schema = data.schema
@@ -97,7 +97,7 @@ class RingSlicesPerLayer(BaseModel):
         else:
             raise TypeError(f"Expected list or array column, got {input_dtype}")
 
-        if passthrough_previous:
+        if passthrough:
             return data.with_columns(polars_expr)
         else:
             return data.select(polars_expr)

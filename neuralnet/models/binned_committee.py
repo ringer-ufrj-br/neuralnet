@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import Any, Annotated, Self, overload, TYPE_CHECKING
 import polars as pl
 from pydantic import (
@@ -44,29 +45,26 @@ def validate_keras_sequential(value: Any) -> "Sequential":
         )
 
 
-class BinnedModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class BinnedModel:
+    def __init__(
+        self,
+        bins: list[VariableBin],
+        keras_model: "Sequential",
+        features: list[str],
+        decision_threshold: float = 0.5,
+    ):
+        self.bins = bins
+        self.keras_model = keras_model
+        self.features = features
+        self.decision_threshold = decision_threshold
 
-    bins: Annotated[
-        list[VariableBin],
-        Field(
-            description="List of VariableBin instances defining the binning criteria for the model."
-        ),
-    ]
-    keras_model: Annotated[
-        Any,
-        Field(description="The Keras model instance for the binned model."),
-        BeforeValidator(validate_keras_sequential),
-    ]
-    features: Annotated[
-        list[str],
-        Field(description="List of feature names to be used in the model."),
-        BeforeValidator(features_validator),
-    ]
-    decision_threshold: Annotated[
-        float,
-        Field(description="Decision threshold for the binary classification model."),
-    ] = 0.5
+    @cached_property
+    def input_cols(self) -> list[str]:
+        return self.features + ["id"] + [bin.var_name for bin in self.bins]
+
+    @cached_property
+    def output_cols(self) -> list[str]:
+        return ["id"] + self.features + ["prediction", "output"]
 
     def row_filter_expr(self) -> pl.Expr:
         expr = self.bins[0].as_polars_expr()
@@ -160,23 +158,23 @@ class BinnedModel(BaseModel):
         data: pl.DataFrame | pl.LazyFrame,
         batch_size: int = 32,
         all_layers: bool = False,
-        join_results: bool = False,
-    ) -> pl.DataFrame:
+        passthrough: bool | list[str] = False,
+    ) -> pl.DataFrame | pl.LazyFrame:
         logger = logging.getLogger()
         selection = [pl.col("id")] + [pl.col(feature) for feature in self.features]
         filtered = data.filter(self.row_filter_expr()).select(*selection)
 
         self.validate_schema(filtered)
-        is_lazy = isinstance(filtered, pl.LazyFrame)
+        input_is_lazy = isinstance(filtered, pl.LazyFrame)
 
-        if is_lazy:
+        if input_is_lazy:
             filtered = filtered.collect()
 
         if filtered.is_empty():
             logger.warning(
                 f"No data points found for the given bins ({self.bins}) and features ({self.features}.) Returning empty DataFrame."
             )
-            return self.get_empty_output(is_lazy)
+            return self.get_empty_output(input_is_lazy)
 
         features = filtered.select(pl.exclude("id")).to_numpy()
         result = filtered.drop(pl.exclude("id"))
@@ -209,33 +207,45 @@ class BinnedModel(BaseModel):
                         )
                     )
 
-        if is_lazy:
+        if input_is_lazy:
             result = result.lazy()
 
-        if join_results:
+        if passthrough:
             result = data.join(result, on="id", how="left")
 
         return result
 
     @overload
-    def predict(self, data: pl.DataFrame, batch_size: int = 32) -> pl.DataFrame: ...
+    def predict(
+        self,
+        data: pl.DataFrame,
+        batch_size: int = 32,
+        all_layers: bool = False,
+        passthrough: bool = False,
+    ) -> pl.DataFrame: ...
 
     @overload
-    def predict(self, data: pl.LazyFrame, batch_size: int = 32) -> pl.LazyFrame: ...
+    def predict(
+        self,
+        data: pl.LazyFrame,
+        batch_size: int = 32,
+        all_layers: bool = False,
+        passthrough: bool = False,
+    ) -> pl.LazyFrame: ...
 
     def predict(
         self,
         data,
         batch_size: int = 32,
         all_layers: bool = False,
-        join_results: bool = False,
+        passthrough: bool = False,
     ):
         if isinstance(data, (pl.DataFrame, pl.LazyFrame)):
             return self.predict_polars(
                 data,
                 batch_size=batch_size,
                 all_layers=all_layers,
-                join_results=join_results,
+                passthrough=passthrough,
             )
         else:
             raise TypeError(
@@ -260,10 +270,28 @@ class BinnedModel(BaseModel):
         return quantized_binned_model
 
 
-class BinnedCommittee(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class BinnedCommittee:
+    
+    def __init__(self, models: list[BinnedModel]):
+        if len(models) < 1:
+            raise ValueError(
+                "BinnedCommittee must contain at least two BinnedModel instances."
+            )
+        self.models = models
 
-    models: list[BinnedModel]
+    @cached_property
+    def input_cols(self) -> list[str]:
+        all_inputs = set()
+        for model in self.models:
+            all_inputs.update(model.input_cols)
+        return list(all_inputs)
+
+    @cached_property
+    def output_cols(self) -> list[str]:
+        all_outputs = set()
+        for model in self.models:
+            all_outputs.update(model.output_cols)
+        return list(all_outputs)
 
     @overload
     def predict_polars(
@@ -280,7 +308,7 @@ class BinnedCommittee(BaseModel):
         data: pl.LazyFrame | pl.DataFrame,
         batch_size: int = 32,
         all_layers: bool = False,
-        join_results: bool = False,
+        passthrough: bool = False,
     ) -> pl.DataFrame:
         prediction_df = []
         for model in self.models:
@@ -290,7 +318,7 @@ class BinnedCommittee(BaseModel):
             prediction_df.append(prediction)
         results = pl.concat(prediction_df)
         del prediction_df
-        if join_results:
+        if passthrough:
             results = data.join(results, on="id", how="left")
         return results
 

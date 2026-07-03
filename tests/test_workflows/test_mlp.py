@@ -112,7 +112,7 @@ def training_job_test_routine(
     inference_pipeline = loaded_job.get_inference_pipeline()
     inference_input = ringer_parquet_dataset.predict_df()
     inference_results = inference_pipeline(
-        inference_input, join_results=True, all_layers=True
+        inference_input, passthrough=True, all_layers=True
     ).collect()
 
     assert isinstance(inference_results, pl.DataFrame), (

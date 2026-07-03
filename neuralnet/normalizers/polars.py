@@ -61,19 +61,19 @@ class AlternativeNorm1(BaseModel):
 
     @overload
     def __call__(
-        self, data: pl.DataFrame, passthrough_previous: bool = False
+        self, data: pl.DataFrame, passthrough: bool = False
     ) -> pl.DataFrame: ...
 
     @overload
     def __call__(
-        self, data: pl.LazyFrame, passthrough_previous: bool = False
+        self, data: pl.LazyFrame, passthrough: bool = False
     ) -> pl.LazyFrame: ...
 
     def __call__(
-        self, data: pl.DataFrame | pl.LazyFrame, passthrough_previous: bool = False
+        self, data: pl.DataFrame | pl.LazyFrame, passthrough: bool = False
     ) -> pl.DataFrame | pl.LazyFrame:
         expr = self.get_expr(data)
-        if passthrough_previous:
+        if passthrough:
             return data.with_columns(*expr)
         return data.select(*expr)
 

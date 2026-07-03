@@ -20,6 +20,7 @@ from pydantic import (
     Field,
     ConfigDict,
     BaseModel,
+    PrivateAttr,
 )
 import logging
 from pathlib import Path
@@ -52,7 +53,7 @@ from ...models.keras.factories import (
 from ...models.binned_committee import BinnedCommittee, BinnedModel, VariableBin
 from ...layers.dense import MLPFactory
 from ...utils import traverse
-from ...polars import AlternativeNorm1
+from ...normalizers.polars import AlternativeNorm1
 from ...utils.polars import RingSlicesPerLayer
 from ...datasets import DirectoryType
 from ...pydantic import YamlBaseModel
@@ -184,7 +185,6 @@ class SelectionCriteria(BaseModel):
             )
 
 
-
 type EtaBinIntervalValue = Annotated[
     float,
     Field(
@@ -217,11 +217,14 @@ class BinValidator:
 type QuantizerConfigType = "QuantizerConfig" | None
 
 
-class PreprocessingPipeline(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    ring_selector: RingSlicesPerLayer
-    normalizer: AlternativeNorm1 | None
+class PreprocessingPipeline:
+    def __init__(
+        self,
+        ring_selector: RingSlicesPerLayer,
+        normalizer: AlternativeNorm1 | None = None,
+    ):
+        self.ring_selector = ring_selector
+        self.normalizer = normalizer
 
     @classmethod
     def from_job_params(
@@ -231,18 +234,16 @@ class PreprocessingPipeline(BaseModel):
         norm_strategy: NormStrategyType = None,
     ):
         ring_selector = RingSlicesPerLayer(
-            input_col=rings_col,
+            rings_col=rings_col,
             fraction=ring_fraction,
             output_format="expanded_columns",
-            output_col_base=f"{rings_col}_selected",
         )
         if norm_strategy == "l1":
             normalizer = AlternativeNorm1(
-                input_col=ring_selector.output_cols,
-                output_col_base=f"{rings_col}_normalized",
+                input_cols=ring_selector.output_cols,
             )
         elif norm_strategy is None:
-            normalizer = None
+            return None
         else:
             raise ValueError(f"Unsupported norm_strategy: {norm_strategy}")
         return cls(
@@ -251,18 +252,28 @@ class PreprocessingPipeline(BaseModel):
         )
 
     @property
+    def input_cols(self) -> list[str]:
+        return self.ring_selector.input_cols
+
+    @property
     def output_cols(self) -> list[str]:
         if self.normalizer is None:
             return self.ring_selector.output_cols
 
         return self.normalizer.output_cols
 
+    @cached_property
+    def aux_cols(self) -> list[str]:
+        if self.normalizer is None:
+            return []
+        return self.ring_selector.output_cols
+
     def __call__(
-        self, data: pl.DataFrame | pl.LazyFrame
+        self, data: pl.DataFrame | pl.LazyFrame, passthrough: bool = False
     ) -> pl.DataFrame | pl.LazyFrame:
-        data = data.pipe(self.ring_selector)
+        data = data.pipe(self.ring_selector, passthrough=passthrough)
         if self.normalizer:
-            data = data.pipe(self.normalizer)
+            data = data.pipe(self.normalizer, passthrough=passthrough)
         return data
 
 
@@ -272,25 +283,42 @@ class BinDict(TypedDict):
     closed: Literal["left", "right", "both", "neither"]
 
 
-class InferencePipeline(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    preprocessing_pipeline: PreprocessingPipeline
-    committee: BinnedCommittee
-    eta_col: EtaColType
+class InferencePipeline:
+    def __init__(
+        self,
+        preprocessing_pipeline: PreprocessingPipeline,
+        committee: BinnedCommittee,
+        eta_col: EtaColType,
+        et_col: EtColType,
+    ):
+        self.preprocessing_pipeline = preprocessing_pipeline
+        self.committee = committee
+        self.eta_col = eta_col
+        self.et_col = et_col
 
     @staticmethod
     def get_abs_eta_col_name(eta_col: EtaColType) -> str:
         return f"{eta_col}_abs"
 
+    @cached_property
+    def input_cols(self) -> list[str]:
+        return self.preprocessing_pipeline.input_cols + [self.eta_col, self.et_col]
+
+    @cached_property
+    def output_cols(self) -> list[str]:
+        return self.committee.output_cols
+
     def __call__(
         self,
         data: pl.DataFrame | pl.LazyFrame,
         all_layers: bool = False,
-        join_results: bool = False,
+        passthrough: bool = False,
     ) -> pl.DataFrame | pl.LazyFrame:
         return (
-            data.pipe(self.preprocessing_pipeline)
+            data.pipe(
+                self.preprocessing_pipeline,
+                passthrough=True
+            )
             .with_columns(
                 pl.col(self.eta_col)
                 .abs()
@@ -299,7 +327,7 @@ class InferencePipeline(BaseModel):
             .pipe(
                 self.committee.predict_polars,
                 all_layers=all_layers,
-                join_results=join_results,
+                passthrough=passthrough,
             )
         )
 
@@ -344,6 +372,7 @@ class InferencePipeline(BaseModel):
             preprocessing_pipeline=preprocessing_pipeline,
             committee=committee,
             eta_col=eta_col,
+            et_col=et_col
         )
 
 
@@ -525,7 +554,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
     def get_numpy_data(self, df: pl.LazyFrame) -> "NumpyDatasetReturnTypes":
         import polars.selectors as cs
 
-        df = df.pipe(self.preprocessing_pipeline)
+        df = df.pipe(self.preprocessing_pipeline, passthrough=True)
         X = df.select(self.preprocessing_pipeline.output_cols)
         y = df.select(self.label_col)
         X, y = pl.collect_all([X, y])
@@ -839,15 +868,11 @@ class MLPKerasTrainingJob(YamlBaseModel):
             "eta_bin.high",
             "eta_bin.closed",
         ]
-        best_init_results = (
-            all_model_results_df
-            .group_by(*bins_cols, "fold")
-            .agg(self.best_init.select_best_expr())
+        best_init_results = all_model_results_df.group_by(*bins_cols, "fold").agg(
+            self.best_init.select_best_expr()
         )
-        selected_models = (
-            best_init_results
-            .group_by(*bins_cols)
-            .agg(self.best_fold.select_best_expr())
+        selected_models = best_init_results.group_by(*bins_cols).agg(
+            self.best_fold.select_best_expr()
         )
         selected_models.write_parquet(self.selected_models_path)
 
