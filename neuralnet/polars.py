@@ -4,7 +4,6 @@ from typing import Annotated, overload
 from pydantic import Field, AfterValidator, BaseModel, ConfigDict
 from functools import cached_property
 from .quantization.quantizers import FixedPointQuantizer
-from .utils import get_ring_slices_per_layer
 
 POLARS_TO_NUMPY_DTYPE = {
     pl.Int8: np.int8,

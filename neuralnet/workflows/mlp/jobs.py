@@ -3,30 +3,27 @@ from collections import defaultdict
 import polars as pl
 from typing import (
     Annotated,
-    Any,
     Literal,
     NotRequired,
     Self,
     TypedDict,
     TYPE_CHECKING,
-    Callable,
 )
 
 if TYPE_CHECKING:
     from hgq.config import QuantizerConfig
+    from keras import Model, Sequential
+    from ...datasets.numpy import NumpyDatasetReturnTypes
+
 from itertools import product
 from pydantic import (
     Field,
     ConfigDict,
-    PrivateAttr,
     BaseModel,
-    computed_field,
-    AfterValidator,
 )
 import logging
 from pathlib import Path
 import numpy as np
-import numpy.typing as npt
 from functools import cached_property
 import json
 from zipfile import ZipFile, ZIP_DEFLATED
@@ -34,20 +31,17 @@ from ...submitit import ExecutorConfig
 from ...logging import LoggerName
 from .dataset import (
     RingerParquetDataset,
-    BatchSizeType,
     DataTableType,
     RingsColType,
     KFoldTableType,
     LabelColType,
     FoldColType,
-    RingFractionType,
-    NormStrategyType,
-    EtColType,
-    EtaColType,
-    Bin,
-    EtaBin,
 )
-from ...metrics import enhanced_confusion_matrix, EnhancedConfusionMatrixDict
+from ...metrics import (
+    enhanced_confusion_matrix,
+    EnhancedConfusionMatrixDict,
+    enhanced_confusion_matrix_from_preds,
+)
 from ...models.keras.factories import (
     EpochsType,
     VerboseType,
@@ -55,33 +49,78 @@ from ...models.keras.factories import (
     LossType,
     OptimizerType,
 )
+from ...models.binned_committee import BinnedCommittee, BinnedModel, VariableBin
 from ...layers.dense import MLPFactory
 from ...utils import traverse
-from ...polars import (
-    PolarsExpression,
-    polars_expression_validator,
-    AlternativeNorm1,
-    PolarsFrame,
-    FixedPointQuantizedAlternativeNorm1,
-    RingSlicesPerLayer,
-)
+from ...polars import AlternativeNorm1
+from ...utils.polars import RingSlicesPerLayer
 from ...datasets import DirectoryType
-from ...json import cast_to_json_value
 from ...pydantic import YamlBaseModel
-from ...quantization import FixedPointQuantizer
+from ...numpy import sigmoid
+from ...bins import (
+    Bin,
+    BinDict,
+    AbsoluteBin,
+    AbsoluteBinDict,
+)
 
-type RingerTrainingJobDatasetType = Annotated[
-    RingerParquetDataset,
+type BalanceClassWeightsType = Annotated[
+    bool,
     Field(
-        description="Dataset to be used.",
-        discriminator="object_type",
+        description="Whether to balance class weights during training. If True, the class weights will be set inversely proportional to the class frequencies.",
     ),
+]
+
+type BatchSizeType = Annotated[
+    int,
+    Field(
+        gt=0,
+        description="Batch size for the dataset. Must be a positive integer.",
+    ),
+]
+
+type EtBinType = Annotated[
+    list[Bin],
+    Field(
+        description="Bins to be used for the Et variable.",
+        min_length=1,
+    ),
+]
+
+type EtaBinType = Annotated[
+    list[AbsoluteBin],
+    Field(
+        description="Bins to be used for the Eta variable.",
+        min_length=1,
+    ),
+]
+
+type EtColType = Annotated[
+    str, Field(description="Name of the et column in the data table")
+]
+
+type EtaColType = Annotated[
+    str, Field(description="Name of the eta column in the data table")
 ]
 
 type FromLogitsType = Annotated[
     bool,
     Field(
         description="Whether the model output to consider is logits. When enabled considers the threshold limits as probabilities between 0 and 1",
+    ),
+]
+
+type NormStrategyType = Annotated[
+    Literal["l1"] | None,
+    Field(
+        description="Normalization strategy to apply to the rings. If None, no normalization is applied. If 'l1', each ring is divided by the sum of all rings for that sample.",
+    ),
+]
+
+type RingFractionType = Annotated[
+    int,
+    Field(
+        description="Fraction of the rings to be used for training. If 2, takes the first half of the rings for each layer. If 3, takes the first third of the rings, and so on.",
     ),
 ]
 
@@ -108,8 +147,8 @@ class EvaluationDict(EnhancedConfusionMatrixDict):
 class RingerCommitteeKerasTrainingJobResults(TypedDict):
     fold: int
     init: int
-    et_bin: Bin
-    eta_bin: Bin
+    et_bin: BinDict
+    eta_bin: AbsoluteBinDict
     fit: FitDict
     train: EvaluationDict
     val: EvaluationDict
@@ -133,6 +172,16 @@ class SelectionCriteria(BaseModel):
         "max",
         description="How to select the best model from initilization or fold groups. Must be either 'max' or 'min'.",
     )
+
+    def filter_polars_expr(self, expr: pl.Expr) -> pl.Expr:
+        if self.criterion == "max":
+            return expr.sort_by(self.key, descending=True).first()
+        elif self.criterion == "min":
+            return expr.sort_by(self.key, descending=False).first()
+        else:
+            raise ValueError(
+                f"Invalid criterion: {self.criterion}. Must be either 'max' or 'min'."
+            )
 
 
 type EtaBinIntervalValue = Annotated[
@@ -164,26 +213,137 @@ class BinValidator:
         return et_bins
 
 
-type EtBinType = Annotated[
-    list[Bin | float],
-    Field(
-        description="Bins to be used for the Et variable. Must be a list of increasing values.",
-        min_length=1,
-    ),
-    AfterValidator(BinValidator(Bin)),
-]
-
-type EtaBinType = Annotated[
-    list[EtaBin | float],
-    Field(
-        description="Bins to be used for the Eta variable. Must be a list of increasing values.",
-        min_length=1,
-    ),
-    AfterValidator(BinValidator(EtaBin)),
-]
-
-
 type QuantizerConfigType = "QuantizerConfig" | None
+
+
+class PreprocessingPipeline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ring_selector: RingSlicesPerLayer
+    normalizer: AlternativeNorm1 | None
+
+    @classmethod
+    def from_job_params(
+        cls,
+        rings_col: RingsColType,
+        ring_fraction: RingFractionType = 2,
+        norm_strategy: NormStrategyType = None,
+    ):
+        ring_selector = RingSlicesPerLayer(
+            input_col=rings_col,
+            fraction=ring_fraction,
+            output_format="expanded_columns",
+            output_col_base=f"{rings_col}_selected",
+        )
+        if norm_strategy == "l1":
+            normalizer = AlternativeNorm1(
+                input_col=ring_selector.output_cols,
+                output_col=f"{rings_col}_normalized",
+            )
+        elif norm_strategy is None:
+            normalizer = None
+        else:
+            raise ValueError(f"Unsupported norm_strategy: {norm_strategy}")
+        return cls(
+            ring_selector=ring_selector,
+            normalizer=normalizer,
+        )
+
+    @property
+    def output_cols(self) -> list[str]:
+        if self.normalizer is None:
+            return self.ring_selector.output_cols
+
+        return self.normalizer.output_cols
+
+    def __call__(
+        self, data: pl.DataFrame | pl.LazyFrame
+    ) -> pl.DataFrame | pl.LazyFrame:
+        data = data.pipe(self.ring_selector)
+        if self.normalizer:
+            data = data.pipe(self.normalizer)
+        return data
+
+
+class BinDict(TypedDict):
+    low: float
+    high: float
+    closed: Literal["left", "right", "both", "neither"]
+
+
+class InferencePipeline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preprocessing_pipeline: PreprocessingPipeline
+    committee: BinnedCommittee
+    eta_col: EtaColType
+
+    @staticmethod
+    def get_abs_eta_col_name(eta_col: EtaColType) -> str:
+        return f"{eta_col}_abs"
+
+    def __call__(
+        self,
+        data: pl.DataFrame | pl.LazyFrame,
+        all_layers: bool = False,
+        join_results: bool = False,
+    ) -> pl.DataFrame | pl.LazyFrame:
+        return (
+            data.pipe(self.preprocessing_pipeline)
+            .with_columns(
+                pl.col(self.eta_col)
+                .abs()
+                .alias(self.get_abs_eta_col_name(self.eta_col))
+            )
+            .pipe(
+                self.committee.predict_polars,
+                all_layers=all_layers,
+                join_results=join_results,
+            )
+        )
+
+    @classmethod
+    def from_job_params(
+        cls,
+        rings_col: RingsColType,
+        ring_fraction: RingFractionType,
+        norm_strategy: NormStrategyType,
+        eta_col: EtaColType,
+        et_col: EtColType,
+        keras_models: list["Sequential"],
+        et_bins: list[BinDict],
+        eta_bins: list[BinDict],
+        decision_thresholds: list[float],
+    ) -> Self:
+        preprocessing_pipeline = PreprocessingPipeline.from_job_params(
+            rings_col=rings_col,
+            ring_fraction=ring_fraction,
+            norm_strategy=norm_strategy,
+        )
+
+        abs_eta_col_name = cls.get_abs_eta_col_name(eta_col)
+        binned_models = []
+        iterator = zip(et_bins, eta_bins, keras_models, decision_thresholds)
+        for et_bin, eta_bin, keras_model, decision_threshold in iterator:
+            binned_model = BinnedModel(
+                bins=[
+                    VariableBin(var_name=et_col, **et_bin),
+                    VariableBin(var_name=abs_eta_col_name, **eta_bin),
+                ],
+                keras_model=keras_model,
+                features=preprocessing_pipeline.output_cols,
+                decision_threshold=decision_threshold,
+            )
+            binned_models.append(binned_model)
+
+        committee = BinnedCommittee(
+            models=binned_models,
+        )
+        return cls(
+            preprocessing_pipeline=preprocessing_pipeline,
+            committee=committee,
+            eta_col=eta_col,
+        )
 
 
 class MLPKerasTrainingJob(YamlBaseModel):
@@ -214,30 +374,25 @@ class MLPKerasTrainingJob(YamlBaseModel):
     verbose: VerboseType = 1
     loss: LossType
     optimizer: OptimizerType
-    balance_class_weights: Annotated[
-        bool,
-        Field(
-            description="Whether to balance class weights during training. If True, the class weights will be set inversely proportional to the class frequencies.",
-        ),
-    ] = True
+    balance_class_weights: BalanceClassWeightsType = True
     inits: Annotated[int, Field(description="Number of initializations")] = 5
     patience: PatienceType = 25
 
     # Threshold Fit
-    num_thresholds: int = Field(
-        ge=2,
-        description="Number of thresholds to evaluate for the strategy.",
-    )
-    lower_threshold: float = Field(
-        ge=0,
-        lt=1,
-        description="Lower threshold limit for the strategy.",
-    )
-    upper_threshold: float = Field(
-        gt=0,
-        le=1,
-        description="Upper threshold limit for the strategy.",
-    )
+    # num_thresholds: int = Field(
+    #     ge=2,
+    #     description="Number of thresholds to evaluate for the strategy.",
+    # )
+    # lower_threshold: float = Field(
+    #     ge=0,
+    #     lt=1,
+    #     description="Lower threshold limit for the strategy.",
+    # )
+    # upper_threshold: float = Field(
+    #     gt=0,
+    #     le=1,
+    #     description="Upper threshold limit for the strategy.",
+    # )
 
     # Execution related fields
     dry_run: Annotated[
@@ -266,18 +421,18 @@ class MLPKerasTrainingJob(YamlBaseModel):
         description="Criterion to select the best fold. Must be a key in the fit dictionary of the training results.",
     )
 
-    # Private
-    _thresholds: list[float] | None = PrivateAttr(None)
+    # # Private
+    # _thresholds: list[float] | None = PrivateAttr(None)
 
-    @property
-    def thresholds(self) -> list[float]:
-        if self._thresholds is None:
-            raise ValueError("Thresholds not initialized")
-        return self._thresholds
+    # @property
+    # def thresholds(self) -> list[float]:
+    #     if self._thresholds is None:
+    #         raise ValueError("Thresholds not initialized")
+    #     return self._thresholds
 
-    @cached_property
-    def thresholds_array(self) -> npt.NDArray[np.floating]:
-        return np.array(self.thresholds)
+    # @cached_property
+    # def thresholds_array(self) -> npt.NDArray[np.floating]:
+    #     return np.array(self.thresholds)
 
     @cached_property
     def config_path(self) -> Path:
@@ -290,6 +445,32 @@ class MLPKerasTrainingJob(YamlBaseModel):
     @cached_property
     def selected_models_path(self) -> Path:
         return self.output_path / "selected_models.parquet"
+
+    @cached_property
+    def preprocessing_pipeline(self) -> PreprocessingPipeline:
+        return PreprocessingPipeline.from_job_params(
+            ring_fraction=self.ring_fraction,
+            rings_col=self.rings_col,
+            norm_strategy=self.norm_strategy,
+        )
+
+    @cached_property
+    def all_model_results(self) -> pl.DataFrame:
+        results_path = self.output_path / "all_models_results.parquet"
+        if not results_path.exists():
+            raise FileNotFoundError(
+                f"All models results file not found at {results_path}"
+            )
+        return pl.read_parquet(results_path)
+
+    @cached_property
+    def selected_models(self) -> pl.DataFrame:
+        selected_models_path = self.output_path / "selected_models.parquet"
+        if not selected_models_path.exists():
+            raise FileNotFoundError(
+                f"Selected models file not found at {selected_models_path}"
+            )
+        return pl.read_parquet(selected_models_path)
 
     def get_member_output_dir(self, member_id: int) -> Path:
         return self.output_path / f"member_{member_id}"
@@ -304,23 +485,107 @@ class MLPKerasTrainingJob(YamlBaseModel):
             member = self.get_member_output_dir(member)
         return member / "results.json.zip"
 
-    def model_post_init(self, context):
-        res = super().model_post_init(context)
-        if self.lower_threshold >= self.upper_threshold:
-            raise ValueError(
-                f"lower_threshold must be less than upper_threshold. Got lower_threshold={self.lower_threshold} and upper_threshold={self.upper_threshold}."
+    # def model_post_init(self, context):
+    #     res = super().model_post_init(context)
+    #     if self.lower_threshold >= self.upper_threshold:
+    #         raise ValueError(
+    #             f"lower_threshold must be less than upper_threshold. Got lower_threshold={self.lower_threshold} and upper_threshold={self.upper_threshold}."
+    #         )
+    #     self._thresholds = np.linspace(
+    #         self.lower_threshold,
+    #         self.upper_threshold,
+    #         self.num_thresholds,
+    #     )
+
+    #     self._thresholds = (
+    #         self._thresholds.tolist()
+    #     )  # Convert to list for JSON serialization
+
+    #     return res
+
+    def get_dataset(
+        self, fold: int, et_bin: BinDict, eta_bin: BinDict, **kwargs
+    ) -> RingerParquetDataset:
+        config_dict = dict(
+            dataset_dir=self.dataset_dir,
+            data_table=self.data_table,
+            rings_col=self.rings_col,
+            kfold_table=self.kfold_table,
+            label_col=self.label_col,
+            fold_col=self.fold_col,
+            fold=fold,
+            et_bin={"var_name": self.et_col, **et_bin},
+            eta_bin={"var_name": self.eta_col, **eta_bin},
+        )
+        config_dict.update(kwargs)
+        dataset = RingerParquetDataset(**config_dict)
+        return dataset
+
+    def get_numpy_data(self, df: pl.LazyFrame) -> "NumpyDatasetReturnTypes":
+        import polars.selectors as cs
+
+        df = df.pipe(self.preprocessing_pipeline)
+        X = df.select(self.preprocessing_pipeline.output_cols)
+        y = df.select(self.label_col)
+        X, y = pl.collect_all([X, y])
+        X = X.to_numpy()
+        y = y.to_numpy().flatten()
+        return X, y
+
+    def get_inference_pipeline(
+        self,
+        et_col: str | None = None,
+        eta_col: str | None = None,
+        rings_col: str | None = None,
+    ) -> InferencePipeline:
+
+        if et_col is None:
+            et_col = self.et_col
+
+        if eta_col is None:
+            eta_col = self.eta_col
+
+        if rings_col is None:
+            rings_col = self.rings_col
+
+        keras_models = []
+        et_bins = []
+        eta_bins = []
+        decision_thresholds = []
+
+        for row in self.selected_models.iter_rows(named=True):
+            member_id = row["id"]
+            keras_model: "Sequential" = self.get_member_model(member_id)
+            keras_models.append(keras_model)
+            et_bins.append(
+                {
+                    "low": row["et_bin.low"],
+                    "high": row["et_bin.high"],
+                    "closed": row["et_bin.closed"],
+                }
             )
-        self._thresholds = np.linspace(
-            self.lower_threshold,
-            self.upper_threshold,
-            self.num_thresholds,
+            eta_bins.append(
+                {
+                    "low": row["eta_bin.low"],
+                    "high": row["eta_bin.high"],
+                    "closed": row["eta_bin.closed"],
+                }
+            )
+            decision_thresholds.append(row["val.max_sp.threshold"])
+
+        inference_pipeline = InferencePipeline.from_job_params(
+            rings_col=rings_col,
+            ring_fraction=self.ring_fraction,
+            norm_strategy=self.norm_strategy,
+            eta_col=eta_col,
+            et_col=et_col,
+            keras_models=keras_models,
+            et_bins=et_bins,
+            eta_bins=eta_bins,
+            decision_thresholds=decision_thresholds,
         )
 
-        self._thresholds = (
-            self._thresholds.tolist()
-        )  # Convert to list for JSON serialization
-
-        return res
+        return inference_pipeline
 
     def submit(self):
 
@@ -341,11 +606,9 @@ class MLPKerasTrainingJob(YamlBaseModel):
             kfold_table=self.kfold_table,
             label_col=self.label_col,
             fold_col=self.fold_col,
-            et_col=self.et_col,
-            eta_col=self.eta_col,
-            ring_fraction=self.ring_fraction,
-            norm_strategy=self.norm_strategy,
+            fold=0,
         )
+
         n_folds = dataset.get_n_folds()
         logger.info(f"The dataset has {n_folds} folds.")
 
@@ -399,30 +662,20 @@ class MLPKerasTrainingJob(YamlBaseModel):
     def _run_training(
         self, member_id: int, et_bin: dict, eta_bin: dict, fold: int, init: int
     ):
-        from neuralnet.models.keras.routines import fit_routine, evaluation_routine
+        from neuralnet.models.keras.routines import fit_routine
         from keras import Model
 
         logger = logging.getLogger(self.logger_name)
         logger.info(
             f"{member_id}: Running training for Et bin {et_bin} and Eta bin {eta_bin}, fold {fold} and init {init}"
         )
-        dataset = RingerParquetDataset(
-            dataset_dir=self.dataset_dir,
-            data_table=self.data_table,
-            rings_col=self.rings_col,
-            kfold_table=self.kfold_table,
-            label_col=self.label_col,
-            fold_col=self.fold_col,
+        dataset = self.get_dataset(
             fold=fold,
-            et_col=self.et_col,
             et_bin=et_bin,
-            eta_col=self.eta_col,
             eta_bin=eta_bin,
-            ring_fraction=self.ring_fraction,
-            norm_strategy=self.norm_strategy,
         )
-        train_numpy = dataset.train_numpy()
-        val_numpy = dataset.val_numpy()
+        train_numpy = self.get_numpy_data(dataset.train_df())
+        val_numpy = self.get_numpy_data(dataset.val_df())
         results: RingerCommitteeKerasTrainingJobResults = {
             "fold": fold,
             "init": init,
@@ -456,8 +709,8 @@ class MLPKerasTrainingJob(YamlBaseModel):
             from_logits=self.from_logits,
         )
         callbacks = [sp_callback]
-        train_data = dataset.train_numpy()
-        val_data = dataset.val_numpy()
+        train_data = self.get_numpy_data(dataset.train_df())
+        val_data = self.get_numpy_data(dataset.val_df())
 
         model, results["fit"] = fit_routine(
             model=model,
@@ -477,53 +730,39 @@ class MLPKerasTrainingJob(YamlBaseModel):
         model_path = self.get_member_model_path(output_dir)
         model.save(str(model_path))
 
-        eval_dict = evaluation_routine(
+        results["train"] = self.run_evaluation(
             model=model,
             data=train_numpy,
-            loss=self.loss.as_keras(),
-            optimizer=self.optimizer.as_keras(),
-            metrics=self.get_metrics(),
-            verbose=self.verbose,
-            batch_size=self.batch_size,
-        )
-        results["train"] = self.process_eval_dict(
-            eval_dict, dataset=dataset, data_category="train"
+            class_weight=dataset.train_class_weights()
+            if self.balance_class_weights
+            else None,
         )
         del train_numpy
 
-        eval_dict = evaluation_routine(
+        results["val"] = self.run_evaluation(
             model=model,
             data=val_numpy,
-            loss=self.loss.as_keras(),
-            optimizer=self.optimizer.as_keras(),
-            metrics=self.get_metrics(),
-            verbose=self.verbose,
-            batch_size=self.batch_size,
-        )
-        results["val"] = self.process_eval_dict(
-            eval_dict, dataset=dataset, data_category="val"
+            class_weight=dataset.val_class_weights()
+            if self.balance_class_weights
+            else None,
         )
         del val_numpy
 
         if not self.dry_run and hasattr(dataset, "test_numpy"):
-            test_numpy = dataset.test_numpy()
-            eval_dict = evaluation_routine(
+            test_numpy = self.get_numpy_data(dataset.test_df())
+            results["test"] = self.run_evaluation(
                 model=model,
                 data=test_numpy,
-                loss=self.loss.as_keras(),
-                optimizer=self.optimizer.as_keras(),
-                metrics=self.get_metrics(),
-                verbose=self.verbose,
-                batch_size=self.batch_size,
+                class_weight=dataset.test_class_weights()
+                if self.balance_class_weights
+                else None,
             )
-            results["test"] = self.process_eval_dict(
-                eval_dict, dataset=dataset, data_category="test"
-            )
-            del test_numpy
 
         logger.info(f"Finished evaluating for fold {fold} and init {init}")
         zip_path = self.get_member_results_path(output_dir)
         results_path = Path(str(zip_path).replace(".zip", ""))
+        from ...json import cast_to_json_value
+
         with results_path.open("w", encoding="utf-8") as f:
             json.dump(cast_to_json_value(results), f, indent=4)
 
@@ -538,74 +777,35 @@ class MLPKerasTrainingJob(YamlBaseModel):
 
         clear_session()
 
-    def get_metrics(self):
-        from keras.metrics import (
-            TrueNegatives,
-            TruePositives,
-            FalseNegatives,
-            FalsePositives,
-        )
-
-        metrics = [
-            TrueNegatives(
-                name="true_negatives",
-                thresholds=self.thresholds,
-            ),
-            TruePositives(
-                name="true_positives",
-                thresholds=self.thresholds,
-            ),
-            FalseNegatives(
-                name="false_negatives",
-                thresholds=self.thresholds,
-            ),
-            FalsePositives(
-                name="false_positives",
-                thresholds=self.thresholds,
-            ),
-        ]
-        return metrics
-
-    def process_eval_dict(
+    def run_evaluation(
         self,
-        eval_dict: dict,
-        dataset: RingerParquetDataset,
-        data_category: str,
+        model: "Model",
+        data: "NumpyDatasetReturnTypes",
+        class_weight: dict[int, float] | None = None,
     ) -> EvaluationDict:
-        import numpy as np
 
-        enhanced_cm_dict = enhanced_confusion_matrix(
-            tn=np.array(eval_dict.pop("true_negatives")),
-            tp=np.array(eval_dict.pop("true_positives")),
-            fn=np.array(eval_dict.pop("false_negatives")),
-            fp=np.array(eval_dict.pop("false_positives")),
-            thresholds=self.thresholds_array,
+        predictions = model.predict(
+            data[0], batch_size=self.batch_size, verbose=self.verbose
         )
-        if self.balance_class_weights:
-            match data_category:
-                case "train":
-                    class_weights = dataset.train_class_weights()
-                case "val":
-                    class_weights = dataset.val_class_weights()
-                case "test":
-                    class_weights = dataset.test_class_weights()
-                case _:
-                    raise ValueError(f"Unknown data_category: {data_category}")
+        if self.from_logits:
+            predictions = sigmoid(predictions)
+        eval_dict = enhanced_confusion_matrix_from_preds(data[1], predictions)
+        if class_weight:
             weighted_eval_dict = {
-                "tn": np.array(enhanced_cm_dict["tn"]) * class_weights[0],
-                "tp": np.array(enhanced_cm_dict["tp"]) * class_weights[1],
-                "fn": np.array(enhanced_cm_dict["fn"]) * class_weights[1],
-                "fp": np.array(enhanced_cm_dict["fp"]) * class_weights[0],
+                "tn": np.array(eval_dict["tn"]) * class_weight[0],
+                "tp": np.array(eval_dict["tp"]) * class_weight[1],
+                "fn": np.array(eval_dict["fn"]) * class_weight[1],
+                "fp": np.array(eval_dict["fp"]) * class_weight[0],
             }
             weighted_enhanced_cm_dict = enhanced_confusion_matrix(
                 tn=weighted_eval_dict["tn"],
                 tp=weighted_eval_dict["tp"],
                 fn=weighted_eval_dict["fn"],
                 fp=weighted_eval_dict["fp"],
-                thresholds=self.thresholds_array,
+                thresholds=np.array(eval_dict["thresholds"]),
             )
-            enhanced_cm_dict["weighted"] = weighted_enhanced_cm_dict
-        return enhanced_cm_dict
+            eval_dict["weighted"] = weighted_enhanced_cm_dict
+        return eval_dict
 
     def post_training(self):
         logger = logging.getLogger(self.logger_name)
@@ -695,24 +895,6 @@ class MLPKerasTrainingJob(YamlBaseModel):
         instance = cls(**config)
         return instance
 
-    @cached_property
-    def all_model_results(self) -> pl.DataFrame:
-        results_path = self.output_path / "all_models_results.parquet"
-        if not results_path.exists():
-            raise FileNotFoundError(
-                f"All models results file not found at {results_path}"
-            )
-        return pl.read_parquet(results_path)
-
-    @cached_property
-    def selected_models(self) -> pl.DataFrame:
-        selected_models_path = self.output_path / "selected_models.parquet"
-        if not selected_models_path.exists():
-            raise FileNotFoundError(
-                f"Selected models file not found at {selected_models_path}"
-            )
-        return pl.read_parquet(selected_models_path)
-
     def get_member_model(self, member_id: int, with_results: bool = False):
         member_output_dir = self.get_member_output_dir(member_id)
 
@@ -735,329 +917,3 @@ class MLPKerasTrainingJob(YamlBaseModel):
                 results = json.load(f)
 
         return model, results
-
-    def get_committee_model(
-        self,
-        et_col: PolarsExpression | None = None,
-        eta_col: PolarsExpression | None = None,
-        rings_col: PolarsExpression | None = None,
-        fold_col: PolarsExpression | bool = False,
-    ) -> tuple[
-        Callable[[PolarsFrame, int], PolarsFrame],
-        AlternativeNorm1,
-        "BinnedKerasModelSpecialistCommittee",
-    ]:
-        if et_col is None:
-            et_col = pl.col(self.et_col)
-        else:
-            et_col = polars_expression_validator(et_col).meta.output_name()
-
-        if eta_col is None:
-            eta_col = pl.col(self.eta_col)
-        else:
-            eta_col = polars_expression_validator(eta_col).meta.output_name()
-
-        if rings_col is None:
-            rings_col = pl.col(self.rings_col)
-        else:
-            rings_col = polars_expression_validator(rings_col).meta.output_name()
-
-        if fold_col is True:
-            fold_col = pl.col(self.fold_col)
-        elif fold_col is False:
-            pass
-        else:
-            fold_col = polars_expression_validator(fold_col).meta.output_name()
-
-        ring_selector = RingSlicesPerLayer(
-            input_col=self.rings_col, fraction=self.ring_fraction, to_array=True
-        )
-
-        if self.norm_strategy == "l1":
-            preprocessing = AlternativeNorm1(
-                input_col=ring_selector.output_col,
-                output_col=f"{self.rings_col}_normalized",
-            )
-        else:
-            raise ValueError(f"Unknown normalization strategy: {self.norm_strategy}")
-
-        from keras.models import Model
-
-        selected_models = []
-        for row in self.selected_models.iter_rows(named=True):
-            member_id = row["id"]
-            keras_model: Model = self.get_member_model(member_id)
-            binned_model_kwargs = dict(
-                bins=[
-                    VariableBin(
-                        col=et_col,
-                        lower=row["et_bin.low"],
-                        upper=row["et_bin.high"],
-                        closed=row["et_bin.closed"],
-                    ),
-                    VariableBin(
-                        col=eta_col,
-                        lower=row["eta_bin.low"],
-                        upper=row["eta_bin.high"],
-                        closed=row["eta_bin.closed"],
-                    ),
-                ],
-                keras_model=keras_model,
-                features=[preprocessing.output_col],
-                decision_threshold=row["val.max_sp.threshold"],
-            )
-            if fold_col:
-                binned_model_kwargs["fold"] = row["fold"]
-                binned_model_kwargs["fold_col"] = fold_col
-            model = BinnedKerasModel(**binned_model_kwargs)
-            selected_models.append(model)
-
-        if not selected_models:
-            raise ValueError("No selected models found.")
-
-        committee_model = BinnedKerasModelSpecialistCommittee(models=selected_models)
-
-        def model_pipeline(data: PolarsFrame, batch_size: int = 32) -> PolarsFrame:
-            return (
-                data.pipe(ring_selector)
-                .pipe(preprocessing)
-                .pipe(committee_model.predict, batch_size=batch_size)
-            )
-
-        return model_pipeline, preprocessing, committee_model
-
-    def get_fixed_point_quantized_committee_model(
-        self,
-        fixed_point_quantizer: FixedPointQuantizer,
-        et_col: PolarsExpression | None = None,
-        eta_col: PolarsExpression | None = None,
-        rings_col: PolarsExpression | None = None,
-        kq_conf: QuantizerConfigType | None = None,
-        bq_conf: QuantizerConfigType | None = None,
-    ) -> tuple[
-        Callable[[PolarsFrame, int], PolarsFrame],
-        FixedPointQuantizedAlternativeNorm1,
-        "BinnedKerasModelSpecialistCommittee",
-    ]:
-        _, preprocessing, committee_model = self.get_committee_model(
-            et_col, eta_col, rings_col
-        )
-        quantized_committee = committee_model.quantize(kq_conf, bq_conf)
-        quantized_preprocessing = preprocessing.quantize(fixed_point_quantizer)
-
-        def model_pipeline(data: PolarsFrame, batch_size: int = 32) -> PolarsFrame:
-            return data.pipe(quantized_preprocessing).pipe(
-                quantized_committee.predict, batch_size=batch_size
-            )
-
-        return model_pipeline, quantized_preprocessing, quantized_committee
-
-
-class VariableBin(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    col: PolarsExpression
-    lower: float
-    upper: float
-    closed: Literal["left", "right", "both", "none"] = "left"
-
-    def model_post_init(self, context):
-        if isinstance(self.col, str):
-            self.col = pl.col(self.col)
-        return super().model_post_init(context)
-
-    @computed_field(
-        repr=False,
-        description="Polars condition for this bin",
-    )
-    @cached_property
-    def is_inside_bin_polars_expr(self) -> pl.Expr:
-        return self.col.is_between(self.lower, self.upper, closed=self.closed)
-
-    def is_inside_numpy(self, value):
-        if self.closed == "left":
-            return self.lower <= value < self.upper
-        elif self.closed == "right":
-            return self.lower < value <= self.upper
-        elif self.closed == "both":
-            return self.lower <= value <= self.upper
-        else:
-            return self.lower < value < self.upper
-
-
-class BinnedKerasModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    bins: list[VariableBin]
-    keras_model: Any
-    features: list[PolarsExpression]
-    decision_threshold: Annotated[
-        float,
-        Field(description="Decision threshold for the binary classification model."),
-    ]
-    fold: int | None = None
-    fold_col: PolarsExpression | None = None
-
-    def model_post_init(self, context):
-        self.features = [
-            pl.col(feature) if isinstance(feature, str) else feature
-            for feature in self.features
-        ]
-
-    @cached_property
-    def row_selector(self) -> pl.Expr:
-        conditions = [bin.is_inside_bin_polars_expr for bin in self.bins]
-        conditions += [feature.is_not_null() for feature in self.features]
-        expr = pl.all_horizontal(conditions)
-        return expr
-
-    @cached_property
-    def batched_predict_polars(self) -> pl.Expr:
-        return self.input_col.map_batches(
-            self.predict_polars_batch, return_dtype=pl.Float32
-        )
-
-    @cached_property
-    def predict_polars_expr(self) -> pl.Expr:
-        """
-        This is extremely slow, please don't use it unless you really need to.
-        """
-        return (
-            pl.when(self.row_selector)
-            .then(self.batched_predict_polars)
-            .otherwise(pl.lit(None, dtype=pl.Float32))
-        )
-
-    def predict_polars_batch(self, batch: pl.Series) -> pl.Series:
-        data = np.stack(batch.to_numpy())
-        prediction = self.predict_numpy(data)
-        return pl.Series(prediction.flatten(), dtype=pl.Float32)
-
-    def predict_numpy(
-        self, data: np.ndarray, batch_size: int = 32
-    ) -> tuple[np.ndarray, np.ndarray[tuple[int,], np.bool_]]:
-        output = self.keras_model.predict(data, batch_size=batch_size).flatten()
-        prediction = np.where(output >= self.decision_threshold, True, False).astype(
-            bool
-        )
-        return output, prediction
-
-    @cached_property
-    def fold_col_expr(self) -> pl.Expr | None:
-        if self.fold_col is None or self.fold is None:
-            return None
-        return (
-            pl.when(self.fold_col == self.fold)
-            .then(True)
-            .when(self.fold_col.is_null())
-            .then(None)
-            .otherwise(False)
-            .alias("is_val_dataset")
-        )
-
-    def predict(
-        self, data: pl.DataFrame | pl.LazyFrame, batch_size: int = 32
-    ) -> pl.DataFrame:
-        logger = logging.getLogger()
-        selection = self.features
-        selection.append(pl.col("id"))
-        if self.fold_col_expr is not None:
-            selection.append(self.fold_col_expr)
-        filtered = data.filter(self.row_selector).select(*selection)
-        if isinstance(filtered, pl.LazyFrame):
-            filtered = filtered.collect()
-        if filtered.is_empty():
-            logger.warning(
-                f"No data points found for the given bins ({self.bins}) and features ({self.features}.) Returning empty DataFrame."
-            )
-            filtered.clear()  # Frees memory premptively
-            del filtered
-            return pl.DataFrame(schema=filtered.schema)
-        if self.fold_col_expr is not None:
-            is_val_dataset = (
-                filtered.select(pl.col("is_val_dataset")).to_numpy().flatten()
-            )
-            filtered = filtered.drop(pl.col("is_val_dataset"))
-        features = filtered.select(pl.exclude("id")).to_numpy()
-        # The features is a column vector where each entry is an array, we
-        # we stack all the arrays into rows with vstack
-        features = np.vstack(np.squeeze(features))
-        filtered = filtered.drop(pl.exclude("id"))
-        output, prediction = self.predict_numpy(features, batch_size=batch_size)
-        del features  # Frees memory premptively
-        output = output.astype(np.float32)
-        prediction = prediction.astype(np.bool_)
-        filtered = filtered.with_columns(
-            pl.Series(output).alias("output"),
-            pl.Series(prediction).alias("prediction"),
-        )
-        if self.fold_col_expr is not None:
-            filtered = filtered.with_columns(
-                pl.Series(is_val_dataset).alias("is_val_dataset")
-            )
-        return filtered
-
-    def quantize(
-        self, kq_conf: QuantizerConfigType = None, bq_conf: QuantizerConfigType = None
-    ) -> Self:
-        from keras import Input, Model
-        from ...layers.dense.hgq import HGQDense
-
-        input_layer = Input(shape=self.keras_model.input_shape[1:])
-        quantized_layer = input_layer
-        for fp_layer in self.keras_model.layers:
-            quantized_layer = HGQDense.from_keras_dense(
-                fp_layer, kq_conf=kq_conf, bq_conf=bq_conf
-            )(quantized_layer)
-
-        quantized_keras_model = Model(
-            inputs=input_layer,
-            outputs=quantized_layer,
-            name=f"{self.keras_model.name}_quantized",
-        )
-
-        quantized_binned_model = BinnedKerasModel(
-            bins=self.bins,
-            keras_model=quantized_keras_model,
-            features=self.features,
-            decision_threshold=self.decision_threshold,
-        )
-        return quantized_binned_model
-
-
-class BinnedKerasModelSpecialistCommittee(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    models: list[BinnedKerasModel]
-
-    @computed_field(
-        repr=False,
-        description="Polars expression for the MoE prediction",
-    )
-    @cached_property
-    def predict_polars_expr(self) -> pl.Expr:
-        first_model = self.models[0]
-        prediction_col = pl.when(
-            first_model.row_selector,
-        ).then(first_model.batched_predict_polars)
-        for model in self.models[1:]:
-            prediction_col = prediction_col.when(model.row_selector).then(
-                model.batched_predict_polars
-            )
-        prediction_col = prediction_col.otherwise(pl.lit(None, dtype=pl.Float32))
-        return prediction_col
-
-    def predict(
-        self, data: pl.LazyFrame | pl.DataFrame, batch_size: int = 32
-    ) -> pl.DataFrame:
-        prediction_df = []
-        for model in self.models:
-            prediction = model.predict(data, batch_size=batch_size)
-            prediction_df.append(prediction)
-        return pl.concat(prediction_df)
-
-    def quantize(
-        self, kq_conf: QuantizerConfigType = None, bq_conf: QuantizerConfigType = None
-    ) -> Self:
-        quantized_models = [model.quantize(kq_conf, bq_conf) for model in self.models]
-        return self.model_copy(update={"models": quantized_models})

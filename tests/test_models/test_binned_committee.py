@@ -41,8 +41,8 @@ def build_constant_binned_model():
         ]
     )
     bins = [
-        VariableBin(var_name="x", lower=0.0, upper=1.0, closed="both"),
-        VariableBin(var_name="y", lower=2.0, upper=3.0, closed="both"),
+        VariableBin(var_name="x", low=0.0, high=1.0, closed="both"),
+        VariableBin(var_name="y", low=2.0, high=3.0, closed="both"),
     ]
     model = BinnedModel(
         bins=bins,

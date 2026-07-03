@@ -4,14 +4,16 @@ import numpy as np
 from pathlib import Path
 import logging
 
+from neuralnet.workflows.mlp.dataset import RingerParquetDataset
+
 
 MLP_JOB_CONFIG = {
     "batch_size": 32,
     "data_table": "data",
     "et_col": "et",
-    "et_bins": [0, 100],
+    "et_bins": [{"low": 0.0, "high": 100.0, "closed": "left"}],
     "eta_col": "eta",
-    "eta_bins": [0, 2.5],
+    "eta_bins": [{"low": 0.0, "high": 2.5, "closed": "left"}],
     "fold_col": "fold",
     "kfold_table": "kfold",
     "label_col": "target_label",
@@ -28,9 +30,6 @@ MLP_JOB_CONFIG = {
     "loss": {"object_type": "binary_cross_entropy", "from_logits": False},
     "optimizer": {"learning_rate": 0.01, "object_type": "adam"},
     "from_logits": False,
-    "num_thresholds": 10,
-    "lower_threshold": 0.1,
-    "upper_threshold": 0.9,
     "epochs": 1,
     "logger_name": None,
     "output_path": None,  # To be set in the test
@@ -43,23 +42,75 @@ TEST_DATA = {
 }
 
 
+@pytest.fixture
+def ringer_dataset_dir(tmp_path: Path) -> Path:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+
+    n_samples = 6
+    n_rings = RingerParquetDataset.N_RINGS
+
+    data_df = pl.DataFrame(
+        {
+            "id": np.arange(n_samples),
+            "rings": [np.arange(n_rings, dtype=float).tolist() for _ in range(n_samples)],
+            "et": np.linspace(10.0, 60.0, n_samples),
+            "eta": np.linspace(0.1, 2.1, n_samples),
+        }
+    )
+    data_df.write_parquet(dataset_dir / "data.parquet")
+
+    kfold_df = pl.DataFrame(
+        {
+            "id": np.arange(n_samples),
+            "target_label": [0, 1, 1, 0, 1, 0],
+            "fold": [0, 0, 1, 1, 0, 1],
+        }
+    )
+    kfold_df.write_parquet(dataset_dir / "kfold.parquet")
+
+    return dataset_dir
+
+
+@pytest.fixture
+def ringer_parquet_dataset(ringer_dataset_dir: Path) -> RingerParquetDataset:
+    return RingerParquetDataset(
+        dataset_dir=ringer_dataset_dir,
+        data_table="data",
+        rings_col="rings",
+        kfold_table="kfold",
+        label_col="target_label",
+        fold_col="fold",
+        fold=0,
+    )
+
+
 @pytest.mark.parametrize(
     ("job_config"),
     list(TEST_DATA.values()),
     ids=list(TEST_DATA.keys()),
 )
 def test_keras_ringer_committee_keras_training_job(
-    tmp_path: Path, job_config: dict, isolated_executor
+    tmp_path: Path,
+    job_config: dict,
+    ringer_dataset_dir: Path,
+    ringer_parquet_dataset: RingerParquetDataset,
+    isolated_executor,
 ):
+    job_config = dict(job_config)
     future = isolated_executor.submit(
         keras_ringer_committee_keras_training_job,
         job_config=job_config,
         tmp_path=tmp_path,
+        dataset_dir=ringer_dataset_dir,
+        ringer_parquet_dataset=ringer_parquet_dataset
     )
     future.result()
 
 
-def keras_ringer_committee_keras_training_job(tmp_path: Path, job_config: dict):
+def keras_ringer_committee_keras_training_job(
+    tmp_path: Path, job_config: dict, dataset_dir: Path,ringer_parquet_dataset: RingerParquetDataset
+):
 
     import os
 
@@ -68,40 +119,9 @@ def keras_ringer_committee_keras_training_job(tmp_path: Path, job_config: dict):
     from neuralnet.workflows.mlp.jobs import (
         MLPKerasTrainingJob,
     )
+    from neuralnet.workflows.mlp.dataset import RingerParquetDataset
     from neuralnet.submitit import ExecutorConfig
-    from keras import Model
-    from keras.backend import clear_session
-
-    # 1. Create a random dataset
-    dataset_dir = tmp_path / "dataset"
-    dataset_dir.mkdir()
     job_config["dataset_dir"] = dataset_dir
-
-    n_samples = 100
-    n_rings = 100
-
-    # Create data_table
-    data_df = pl.DataFrame(
-        {
-            "id": np.arange(n_samples),
-            "rings": [np.random.rand(n_rings).tolist() for _ in range(n_samples)],
-            "et": np.random.rand(n_samples) * 100.0,
-            "eta": np.random.rand(n_samples) * 2.5,
-        }
-    )
-    data_df.write_parquet(dataset_dir / "data.parquet")
-
-    # Create kfold_table
-    kfold_df = pl.DataFrame(
-        {
-            "id": np.arange(n_samples),
-            "target_label": np.random.randint(0, 2, size=n_samples),
-            "fold": [i % 2 for i in range(n_samples)],  # 2 folds
-        }
-    )
-    kfold_df.write_parquet(dataset_dir / "kfold.parquet")
-
-    # 4. Configure Executor
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
     executor_config = ExecutorConfig(
@@ -115,7 +135,6 @@ def keras_ringer_committee_keras_training_job(tmp_path: Path, job_config: dict):
     job_config["output_path"] = tmp_path / "output"
 
     job = MLPKerasTrainingJob(**job_config)
-    # 6. Run the job
     job.submit()
 
     loaded_job = MLPKerasTrainingJob.load(job_config["output_path"])
@@ -123,109 +142,70 @@ def keras_ringer_committee_keras_training_job(tmp_path: Path, job_config: dict):
         "Loaded job is not of the expected type"
     )
     assert loaded_job == job, "Loaded job is not equal to the original job"
+    MLPKerasTrainingJob.validate_saved_directory(job_config["output_path"])
     assert isinstance(loaded_job.all_model_results, pl.DataFrame), (
         "Loaded job's all_model_results is not a Polars DataFrame"
     )
     assert isinstance(loaded_job.selected_models, pl.DataFrame), (
         "Loaded job's selected_models is not a Polars DataFrame"
     )
-    for row in loaded_job.all_model_results.iter_rows(named=True):
-        keras_model, _ = loaded_job.get_member_model(row["id"], with_results=True)
-        assert isinstance(keras_model, Model), (
-            f"Loaded model {row['id']} is not a Keras Model instance"
-        )
-        # Checks if predictions are possible
-        assert keras_model.input_shape == (None, n_rings), (
-            f"Model {row['id']} has unexpected input shape {keras_model.input_shape}"
-        )
-        sample_input = np.random.rand(
-            100, n_rings
-        )  # Assuming input shape is (None, n_rings)
-        predictions = keras_model.predict(sample_input)
-        assert predictions.shape == (100, 1), (
-            f"Model {row['id']} produced predictions with unexpected shape {predictions.shape}"
-        )
-        del keras_model  # Free memory
-        clear_session()  # Clear Keras session to free memory
+    n_folds = ringer_parquet_dataset.get_n_folds()
+    assert loaded_job.all_model_results.height == n_folds * job.inits * len(job.et_bins) * len(job.eta_bins)
+    assert 1 <= loaded_job.selected_models.height <= loaded_job.all_model_results.height
+
+    inference_pipeline = loaded_job.get_inference_pipeline()
+    inference_dataset = RingerParquetDataset(
+        dataset_dir=dataset_dir,
+        data_table=job.data_table,
+        rings_col=job.rings_col,
+        kfold_table=job.kfold_table,
+        label_col=job.label_col,
+        fold_col=job.fold_col,
+        fold=0,
+    )
+    inference_input = inference_dataset.predict_df()
+    inference_results = inference_pipeline(inference_input).collect()
+
+    assert inference_results.height == 1 * loaded_job.selected_models.height
+    assert "id" in inference_results.columns
+    assert "prediction" in inference_results.columns
+    assert "output" in inference_results.columns
+
+    assert inference_results.get_column("prediction").dtype == pl.Boolean
+    assert inference_results.get_column("output").min() >= 0
+    assert inference_results.get_column("output").max() <= 1
 
     logging.info("Finished")
 
 
-@pytest.fixture
-def ringer_dataset(test_data_dir: Path):
-    from neuralnet.workflows.mlp.dataset import RingerParquetDataset, Bin, EtaBin
+def test_ringer_parquet_dataset_splits_and_weights(
+    ringer_parquet_dataset: RingerParquetDataset,
+):
+    dataset = ringer_parquet_dataset
 
-    dataset_dir = str(test_data_dir / "test_dataset")
-    return RingerParquetDataset(
-        dataset_dir=dataset_dir,
-        data_table="electron_ringer.parquet",
-        rings_col="TrigEMClusterContainer.ringsE",
-        kfold_table="standard_binning_kfold.parquet",
-        label_col="label",
-        fold_col="kfold"
+    assert dataset.get_n_folds() == 2
+
+    rings_expr, ring_names = dataset.open_rings_expr()
+    assert len(rings_expr) == dataset.N_RINGS
+    assert len(ring_names) == dataset.N_RINGS
+    assert ring_names[0] == "rings.0"
+    assert ring_names[-1] == "rings.99"
+
+    assert dataset.train_df().collect().get_column("id").to_list() == [2, 3, 5]
+    assert dataset.val_df().collect().get_column("id").to_list() == [0, 1, 4]
+    assert dataset.test_df().collect().get_column("id").to_list() == [0, 1, 2, 3, 4, 5]
+    assert dataset.predict_df().collect().get_column("id").to_list() == [0, 1, 2, 3, 4, 5]
+
+    assert dataset.train_class_weights() == {0: 0.75, 1: 1.5}
+    assert dataset.val_class_weights() == {0: 1.5, 1: 0.75}
+    assert dataset.test_class_weights() == {0: 1.0, 1: 1.0}
+    assert dataset.predict_class_weights() == {0: 1.0, 1: 1.0}
+
+    np.testing.assert_allclose(
+        np.sort(dataset.train_sample_weights()), np.array([0.75, 0.75, 1.5])
     )
-
-
-@pytest.mark.parametrize("split", ["train", "val", "test", "predict"])
-def test_dataset_numpy(ringer_dataset, split: str):
-    method = getattr(ringer_dataset, f"{split}_numpy")
-    X, y = method()
-    assert isinstance(X, np.ndarray)
-    assert isinstance(y, np.ndarray)
-    assert X.shape[1] == 100
-    assert len(X) == len(y)
-
-
-@pytest.mark.parametrize("split", ["train", "val", "test", "predict"])
-def test_dataset_dataloader(ringer_dataset, split: str):
-    import torch
-
-    method = getattr(ringer_dataset, f"{split}_dataloader")
-    dl = method(batch_size=32)
-    batch = next(iter(dl))
-
-    assert isinstance(batch, (list, tuple))
-    assert len(batch) == 2
-
-    dataset_tensor = batch[0]
-    label_tensor = batch[1]
-
-    assert isinstance(dataset_tensor, torch.Tensor)
-    assert isinstance(label_tensor, torch.Tensor)
-    assert dataset_tensor.shape[1] == 100
-    assert dataset_tensor.shape[0] <= 32
-    assert label_tensor.shape[0] == dataset_tensor.shape[0]
-
-
-# def test_cli_inference_loads_yaml_and_submits(isolated_executor):
-#     future = isolated_executor.submit(
-#         cli_inference_loads_yaml_and_submits_routine,
-#     )
-#     future.result()
-
-
-# def cli_inference_loads_yaml_and_submits_routine():
-#     import os
-
-#     os.environ["KERAS_BACKEND"] = "tensorflow"
-#     from neuralnet.workflows.mlp import cli as mlp_cli
-
-#     config_path = Path("/home/lucasbanunes/data/neuralnet_jobs/mlp/inference.yaml")
-#     mlp_cli.inference(config=config_path)
-
-
-def test_cli_uniform_ptq_inference_loads_yaml_and_submits(isolated_executor):
-    future = isolated_executor.submit(
-        cli_uniform_ptq_inference_loads_yaml_and_submits_routine,
+    np.testing.assert_allclose(
+        np.sort(dataset.val_sample_weights()), np.array([0.75, 0.75, 1.5])
     )
-    future.result()
-
-
-def cli_uniform_ptq_inference_loads_yaml_and_submits_routine():
-    import os
-
-    os.environ["KERAS_BACKEND"] = "tensorflow"
-    from neuralnet.workflows.mlp import cli as mlp_cli
-
-    config_path = Path("/home/lucasbanunes/data/neuralnet_jobs/mlp/ptq_inference.yaml")
-    mlp_cli.uniform_ptq_inference(config=config_path)
+    np.testing.assert_allclose(dataset.test_sample_weights(), np.ones(6))
+    np.testing.assert_allclose(dataset.predict_sample_weights(), np.ones(6))

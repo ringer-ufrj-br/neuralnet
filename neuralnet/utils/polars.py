@@ -6,18 +6,17 @@ from . import get_ring_slices_per_layer
 
 
 class RingSlicesPerLayer(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     fraction: Annotated[
         int, Field(gt=0, description="Fraction of rings to select per layer.")
     ]
     output_format: Annotated[
-        Literal['expanded_columns'],
+        Literal["expanded_columns"],
         Field(
             description="Output format for the selected rings. Currently, only 'expanded_columns' is supported."
-        )
-    ] = 'expanded_columns'
-
+        ),
+    ] = "expanded_columns"
     input_col: Annotated[
         str,
         Field(
@@ -36,9 +35,11 @@ class RingSlicesPerLayer(BaseModel):
 
     def get_list_polars_expr(self) -> pl.Expr:
         idxs = get_ring_slices_per_layer(self.fraction)
-        if self.output_format == 'expanded_columns':
+        if self.output_format == "expanded_columns":
             cols = [
-                pl.col(self.input_col).list.get(i).alias(self.get_expanded_column_name(i))
+                pl.col(self.input_col)
+                .list.get(i)
+                .alias(self.get_expanded_column_name(i))
                 for i in idxs
             ]
             return cols
@@ -47,15 +48,17 @@ class RingSlicesPerLayer(BaseModel):
 
     def get_array_polars_expr(self) -> pl.Expr:
         idxs = get_ring_slices_per_layer(self.fraction)
-        if self.output_format == 'expanded_columns':
+        if self.output_format == "expanded_columns":
             cols = [
-                pl.col(self.input_col).arr.get(i).alias(self.get_expanded_column_name(i))
+                pl.col(self.input_col)
+                .arr.get(i)
+                .alias(self.get_expanded_column_name(i))
                 for i in idxs
             ]
             return cols
         else:
             raise ValueError(f"Unsupported output_format: {self.output_format}")
-    
+
     @cached_property
     def output_cols(self) -> list[str]:
         idxs = get_ring_slices_per_layer(self.fraction)
@@ -98,12 +101,9 @@ class RingSlicesPerLayer(BaseModel):
 
 
 class Open1DArray(BaseModel):
-
     input_col: Annotated[
         str,
-        Field(
-            description="Name of the input column containing the data array."
-        ),
+        Field(description="Name of the input column containing the data array."),
     ]
     output_col: Annotated[
         str,
@@ -138,7 +138,7 @@ class Open1DArray(BaseModel):
             raise TypeError(
                 f"Expected array for column '{self.input_col}', got {input_dtype}"
             )
-        
+
         if not isinstance(input_dtype.shape, int):
             raise TypeError(
                 f"Expected 1D array for column '{self.input_col}', got {input_dtype.shape}"
@@ -146,6 +146,6 @@ class Open1DArray(BaseModel):
 
         return data.with_columns(
             pl.col(self.input_col)
-            .arr.to_struct(fields=lambda idx: f'{self.output_col}.{idx}')
+            .arr.to_struct(fields=lambda idx: f"{self.output_col}.{idx}")
             .alias(self.output_col)
         ).unnest(self.output_col)

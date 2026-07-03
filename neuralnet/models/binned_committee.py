@@ -1,73 +1,22 @@
-from typing import Any, Annotated, Self, Literal, overload
+from typing import Any, Annotated, Self, overload, TYPE_CHECKING
 import polars as pl
 from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
     Field,
-    TYPE_CHECKING,
-    field_serializer,
 )
 import numpy as np
 import logging
-from functools import cached_property
 
 from torch.nn import Sequential
 from ..polars import PolarsFrame
+from ..bins import VariableBin
 
 if TYPE_CHECKING:
     from hgq.config import QuantizerConfig
 
 type QuantizerConfigType = "QuantizerConfig" | None
-
-
-def infinity_validator(value: Any) -> float:
-    if value == "inf" or value == "Infinity":
-        return float("inf")
-    elif value == "-inf" or value == "-Infinity":
-        return float("-inf")
-    return float(value)
-
-
-Infinityvalidator = BeforeValidator(infinity_validator)
-
-
-class VariableBin(BaseModel):
-    var_name: Annotated[
-        str, Field(description="Name of the variable used in the binning.")
-    ]
-    low: Annotated[
-        float, Field(..., description="Lower bound of the bin"), Infinityvalidator
-    ]
-    high: Annotated[
-        float, Field(..., description="Upper bound of the bin"), Infinityvalidator
-    ]
-    closed: Annotated[
-        Literal["left", "right", "both", "none"],
-        Field(
-            description="Indicates whether the bin is closed on the left, right, both, or neither side."
-        ),
-    ]
-
-    @field_serializer("low", "high")
-    def serialize_bound(self, value: float) -> str | float:
-        if value == float("inf"):
-            return "Infinity"
-        if value == float("-inf"):
-            return "-Infinity"
-        return value
-
-    def as_polars_expr(self) -> pl.Expr:
-        return pl.col(self.var_name).is_between(self.low, self.high, closed=self.closed)
-
-    @overload
-    def apply_bin(self, df: pl.DataFrame) -> pl.DataFrame: ...
-
-    @overload
-    def apply_bin(self, df: pl.LazyFrame) -> pl.LazyFrame: ...
-
-    def is_inside_polars(self, df: PolarsFrame) -> PolarsFrame:
-        return df.filter(self.as_polars_expr())
 
 
 def features_validator(value: Any) -> list[str]:
@@ -311,7 +260,7 @@ class BinnedModel(BaseModel):
         return quantized_binned_model
 
 
-class BinnedCommittee:
+class BinnedCommittee(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     models: list[BinnedModel]
