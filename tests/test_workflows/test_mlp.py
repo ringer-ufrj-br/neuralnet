@@ -5,7 +5,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from neuralnet.workflows.mlp.dataset import RingerParquetDataset
+    from neuralnet.datasets.ringer import RingerParquetDataset
 
 
 def test_training_job(

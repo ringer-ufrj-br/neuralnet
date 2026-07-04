@@ -5,7 +5,7 @@ from concurrent.futures import ProcessPoolExecutor
 import logging
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from neuralnet.workflows.mlp.dataset import RingerParquetDataset
+    from neuralnet.datasets.ringer import RingerParquetDataset
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def session_tmp_path():
 
 @pytest.fixture(scope='session')
 def ringer_dataset_dir(session_tmp_path: Path) -> Path:
-    from neuralnet.workflows.mlp.dataset import generate_ringer_dataset_dfs
+    from neuralnet.datasets.ringer import generate_ringer_dataset_dfs
 
     logging.info(f"Creating Ringer dataset in {session_tmp_path}")
 
@@ -67,7 +67,7 @@ def ringer_dataset_dir(session_tmp_path: Path) -> Path:
 
 @pytest.fixture
 def ringer_parquet_dataset(ringer_dataset_dir: Path) -> 'RingerParquetDataset':
-    from neuralnet.workflows.mlp.dataset import RingerParquetDataset
+    from neuralnet.datasets.ringer import RingerParquetDataset
     return RingerParquetDataset(
         dataset_dir=ringer_dataset_dir,
         data_table="data",
@@ -116,7 +116,7 @@ def small_ringer_dataset_dir(session_tmp_path: Path) -> Path:
 
 @pytest.fixture
 def small_ringer_parquet_dataset(small_ringer_dataset_dir: Path) -> 'RingerParquetDataset':
-    from neuralnet.workflows.mlp.dataset import RingerParquetDataset
+    from neuralnet.datasets.ringer import RingerParquetDataset
     return RingerParquetDataset(
         dataset_dir=small_ringer_dataset_dir,
         data_table="data",

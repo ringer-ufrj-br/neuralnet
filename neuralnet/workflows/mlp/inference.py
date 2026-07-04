@@ -8,7 +8,7 @@ import polars as pl
 
 from ...submitit import ExecutorConfig
 from .training import MLPKerasTrainingJob
-from .dataset import (
+from ...datasets.ringer import (
     DataTableType,
     RingsColType,
     EtColType,
@@ -69,14 +69,13 @@ class InferenceJob(YamlBaseModel):
             kfold_df = dataset.get_dataframe(self.kfold_table)
             data_table = data_table.join(kfold_df, on="id", how="left")
 
-        prediction_function, _, _ = training_job.get_committee_model(
+        inference_pipeline = training_job.get_inference_pipeline(
             et_col=self.et_col,
             eta_col=self.eta_col,
             rings_col=self.rings_col,
-            fold_col=self.fold_col if self.fold_col else False,
         )
         logger.info(f"Loaded model, running inference on data table {self.data_table}")
-        prediction_df = prediction_function(data_table, self.batch_size)
+        prediction_df = inference_pipeline(data_table, self.batch_size)
         output_table_path = dataset.get_table_path(self.output_table)
         logger.info(f"Writing predictions to {output_table_path}")
         prediction_df.write_parquet(

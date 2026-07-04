@@ -1,11 +1,9 @@
-from typing import Annotated
-from pydantic import JsonValue, Field
 from keras import Loss, Model, Optimizer, Metric
 from keras.callbacks import Callback, History
 from datetime import datetime
 import logging
-
-from ...datasets.numpy import NumpyDataset, NumpyDatasetReturnTypes
+import numpy as np
+from pydantic import JsonValue
 
 from ...json import cast_to_json_value
 
@@ -15,12 +13,6 @@ from .factories import (
     FitRoutineDict,
     StandardEvaluationDict,
 )
-
-
-type ModelDatasetType = Annotated[
-    NumpyDataset,
-    Field(description="Validation dataset as a tuple of (X_val, y_val)"),
-]
 
 
 def safe_jit_compile(model: Model, **compile_kwargs) -> Model:
@@ -42,8 +34,8 @@ def safe_jit_compile(model: Model, **compile_kwargs) -> Model:
 
 def fit_routine(
     model: Model,
-    train_data: NumpyDatasetReturnTypes,
-    val_data: NumpyDatasetReturnTypes | None,
+    train_data: tuple[np.ndarray, np.ndarray],
+    val_data: tuple[np.ndarray, np.ndarray] | None,
     loss: Loss,
     optimizer: Optimizer,
     metrics: list[Metric | str] | None = None,
@@ -96,7 +88,7 @@ def fit_routine(
 
 def evaluation_routine(
     model: Model,
-    data: NumpyDatasetReturnTypes,
+    data: tuple[np.ndarray, np.ndarray],
     loss: Loss,
     optimizer: Optimizer,
     metrics: list[Metric | str] | None = None,
@@ -105,6 +97,7 @@ def evaluation_routine(
     batch_size: int | None = None,
 ) -> StandardEvaluationDict:
     from ... import get_logger
+
     logger = get_logger()
     if metrics is None:
         metrics = []
@@ -114,7 +107,9 @@ def evaluation_routine(
 
     start = datetime.now()
     model = safe_jit_compile(model, loss=loss, optimizer=optimizer, metrics=metrics)
-    results = model.evaluate(*data, verbose=verbose, return_dict=True, batch_size=batch_size)
+    results = model.evaluate(
+        *data, verbose=verbose, return_dict=True, batch_size=batch_size
+    )
     results = cast_to_json_value(results)
     end = datetime.now()
     # logger.info(f"Finished evaluating for model {model.name} with results: {results}")

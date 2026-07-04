@@ -2,11 +2,10 @@ from typing import Annotated, Literal, ClassVar
 from pydantic import ConfigDict, Field
 import polars as pl
 import numpy as np
-from pathlib import Path
 from itertools import product
-from ...datasets import ParquetDataset
-from ... import get_logger
-from ...bins import VariableBin, AbsoluteVariableBin, BinDict, Bin
+from . import ParquetDataset
+from .. import get_logger
+from ..bins import VariableBin, AbsoluteVariableBin, BinDict, Bin
 
 
 type DataTableType = Annotated[

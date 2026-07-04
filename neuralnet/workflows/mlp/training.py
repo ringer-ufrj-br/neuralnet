@@ -13,14 +13,12 @@ from typing import (
 if TYPE_CHECKING:
     from hgq.config import QuantizerConfig
     from keras import Model, Sequential
-    from ...datasets.numpy import NumpyDatasetReturnTypes
 
 from itertools import product
 from pydantic import (
     Field,
     ConfigDict,
     BaseModel,
-    PrivateAttr,
 )
 import logging
 from pathlib import Path
@@ -30,7 +28,7 @@ import json
 from zipfile import ZipFile, ZIP_DEFLATED
 from ...submitit import ExecutorConfig
 from ...logging import LoggerName
-from .dataset import (
+from ...datasets.ringer import (
     RingerParquetDataset,
     DataTableType,
     RingsColType,
@@ -51,7 +49,7 @@ from ...models.keras.factories import (
     OptimizerType,
 )
 from ...models.binned_committee import BinnedCommittee, BinnedModel, VariableBin
-from ...layers.dense import MLPFactory
+from ...models.dense import MLPFactory
 from ...utils import traverse
 from ...normalizers.polars import AlternativeNorm1
 from ...utils.polars import RingSlicesPerLayer
@@ -311,14 +309,12 @@ class InferencePipeline:
     def __call__(
         self,
         data: pl.DataFrame | pl.LazyFrame,
+        batch_size: int = 32,
         all_layers: bool = False,
         passthrough: bool = False,
     ) -> pl.DataFrame | pl.LazyFrame:
         return (
-            data.pipe(
-                self.preprocessing_pipeline,
-                passthrough=True
-            )
+            data.pipe(self.preprocessing_pipeline, passthrough=True)
             .with_columns(
                 pl.col(self.eta_col)
                 .abs()
@@ -328,6 +324,7 @@ class InferencePipeline:
                 self.committee.predict_polars,
                 all_layers=all_layers,
                 passthrough=passthrough,
+                batch_size=batch_size
             )
         )
 
@@ -372,7 +369,7 @@ class InferencePipeline:
             preprocessing_pipeline=preprocessing_pipeline,
             committee=committee,
             eta_col=eta_col,
-            et_col=et_col
+            et_col=et_col,
         )
 
 
@@ -551,9 +548,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
         dataset = RingerParquetDataset(**config_dict)
         return dataset
 
-    def get_numpy_data(self, df: pl.LazyFrame) -> "NumpyDatasetReturnTypes":
-        import polars.selectors as cs
-
+    def get_numpy_data(self, df: pl.LazyFrame) -> tuple[np.ndarray, np.ndarray]:
         df = df.pipe(self.preprocessing_pipeline, passthrough=True)
         X = df.select(self.preprocessing_pipeline.output_cols)
         y = df.select(self.label_col)
@@ -811,7 +806,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
     def run_evaluation(
         self,
         model: "Model",
-        data: "NumpyDatasetReturnTypes",
+        data: tuple[np.ndarray, np.ndarray],
         class_weight: dict[int, float] | None = None,
     ) -> EvaluationDict:
 

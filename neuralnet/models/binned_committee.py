@@ -1,17 +1,10 @@
 from functools import cached_property
-from typing import Any, Annotated, Self, overload, TYPE_CHECKING
+from typing import Any, Self, overload, TYPE_CHECKING
 import polars as pl
-from pydantic import (
-    BaseModel,
-    BeforeValidator,
-    ConfigDict,
-    Field,
-)
 import numpy as np
 import logging
 
 from torch.nn import Sequential
-from ..polars import PolarsFrame
 from ..bins import VariableBin
 
 if TYPE_CHECKING:
@@ -77,7 +70,7 @@ class BinnedModel:
         prediction = self.predict_numpy(data)
         return pl.Series(prediction.flatten(), dtype=pl.Float32)
 
-    def validate_schema(self, df: PolarsFrame) -> None:
+    def validate_schema(self, df: pl.LazyFrame | pl.DataFrame) -> None:
         """
         Validates that the DataFrame has the required columns for prediction.
         Raises a ValueError if any required column is missing.
@@ -295,12 +288,14 @@ class BinnedCommittee:
 
     @overload
     def predict_polars(
-        self, data: pl.LazyFrame, batch_size: int = 32
+        self, data: pl.LazyFrame, batch_size: int = 32,
+        all_layers: bool = False, passthrough: bool = False
     ) -> pl.DataFrame: ...
 
     @overload
     def predict_polars(
-        self, data: pl.DataFrame, batch_size: int = 32
+        self, data: pl.DataFrame, batch_size: int = 32,
+        all_layers: bool = False, passthrough: bool = False
     ) -> pl.DataFrame: ...
 
     def predict_polars(

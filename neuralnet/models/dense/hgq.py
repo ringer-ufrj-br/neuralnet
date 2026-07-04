@@ -1,11 +1,13 @@
-from hgq.layers import QDense
-from hgq.config import QuantizerConfig
-from keras.layers import Dense
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from hgq.layers import QDense
+    from hgq.config import QuantizerConfig
+    from keras.layers import Dense
 
 
 def keras_dense_to_hgq_dense(
-    keras_layer: Dense, kq_conf: QuantizerConfig = None, bq_conf: QuantizerConfig = None
-):
+    keras_layer: 'Dense', kq_conf: 'QuantizerConfig' = None, bq_conf: 'QuantizerConfig' = None
+) -> 'QDense':
     """Convert a Keras Dense layer into an HGQ quantized dense layer.
 
     Parameters
@@ -22,6 +24,7 @@ def keras_dense_to_hgq_dense(
     hgq.layers.QDense
         A quantized dense layer with the same configuration and copied weights.
     """
+    from hgq.layers import QDense
     quantized_layer = QDense(
         units=keras_layer.units,
         activation=keras_layer.activation,

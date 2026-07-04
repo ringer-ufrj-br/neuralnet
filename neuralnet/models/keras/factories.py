@@ -1,14 +1,14 @@
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, Field
 from typing import Annotated, Literal, TypedDict
 from datetime import datetime
 
-from ...layers.dense import DenseFactory
+from ..dense import DenseFactory
 from ...layers.quantum import (
     BasicEntanglerQuantumLayerWithAnglerEmbeddingFactory,
     StronglyEntanglingQuantumLayerWithAnglerEmbeddingFactory,
     HardwareEfficientQuantumLayerWithAnglerEmbeddingFactory,
 )
-from ...layers.kan import KAN1DLayerFactory
+from ..kan import KAN1DLayerFactory
 from ...losses.binary_loss import BinaryCrossEntropyLossFactory
 from ...optimizers.adam import AdamFactory
 

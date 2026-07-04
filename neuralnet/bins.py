@@ -1,4 +1,3 @@
-from functools import cached_property
 from typing import Any, Literal, TypedDict, overload, Annotated
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer
 import polars as pl

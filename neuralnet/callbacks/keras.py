@@ -17,6 +17,10 @@ class SP(Callback):
                  save_the_best=False,
                  patience=False,
                  from_logits=False):
+        
+        from keras.config import backend
+        if backend() != "tensorflow":
+            raise RuntimeError("SP callback is only supported for TensorFlow backend.")
 
         super().__init__()
         self.verbose = verbose

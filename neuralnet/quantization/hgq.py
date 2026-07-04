@@ -44,7 +44,7 @@ def hgq_quantize(
     weight_quantizer_config: HGQFixedPointConfig,
     bias_quantizer_config: HGQFixedPointConfig,
 ) -> "Sequential":
-    from ..layers.dense.hgq import keras_dense_to_hgq_dense
+    from ..models.dense.hgq import keras_dense_to_hgq_dense
     from keras import Sequential, Input
     from keras.layers import Dense
 
