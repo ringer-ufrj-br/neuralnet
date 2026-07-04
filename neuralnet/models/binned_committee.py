@@ -44,7 +44,7 @@ class BinnedModel:
         bins: list[VariableBin],
         keras_model: "Sequential",
         features: list[str],
-        decision_threshold: float = 0.5,
+        decision_threshold: float | None = None,
     ):
         self.bins = bins
         self.keras_model = keras_model
@@ -57,18 +57,15 @@ class BinnedModel:
 
     @cached_property
     def output_cols(self) -> list[str]:
-        return ["id"] + self.features + ["prediction", "output"]
+        if self.decision_threshold is not None:
+            return ["id"] + self.features + ["prediction", "output"]
+        return ["id"] + self.features + ["output"]
 
     def row_filter_expr(self) -> pl.Expr:
         expr = self.bins[0].as_polars_expr()
         for bin in self.bins[1:]:
             expr = expr & bin.as_polars_expr()
         return expr
-
-    def predict_polars_batch(self, batch: pl.Series) -> pl.Series:
-        data = np.stack(batch.to_numpy())
-        prediction = self.predict_numpy(data)
-        return pl.Series(prediction.flatten(), dtype=pl.Float32)
 
     def validate_schema(self, df: pl.LazyFrame | pl.DataFrame) -> None:
         """
@@ -102,15 +99,6 @@ class BinnedModel:
             raise ExceptionGroup(
                 "Errors in DataFrame schema features validation", features_exceptions
             )
-
-    def predict_numpy(
-        self, data: np.ndarray, batch_size: int = 32
-    ) -> tuple[np.ndarray, np.ndarray[tuple[int,], np.bool_]]:
-        output = self.keras_model.predict(data, batch_size=batch_size).flatten()
-        prediction = np.where(output >= self.decision_threshold, True, False).astype(
-            bool
-        )
-        return output, prediction
 
     def all_layers_predict_numpy(
         self, data: np.ndarray, batch_size: int = 32
@@ -172,11 +160,15 @@ class BinnedModel:
         features = filtered.select(pl.exclude("id")).to_numpy()
         result = filtered.drop(pl.exclude("id"))
 
-        output, prediction = self.predict_numpy(features, batch_size=batch_size)
-        result = result.with_columns(
-            pl.Series(prediction.astype(np.bool_)).alias("prediction"),
-        )
-        del prediction
+        output = self.keras_model.predict(features, batch_size=batch_size).flatten()
+        if self.decision_threshold is not None:
+            prediction = np.where(
+                output >= self.decision_threshold, True, False
+            ).astype(bool)
+            result = result.with_columns(
+                pl.Series(prediction.astype(np.bool_)).alias("prediction"),
+            )
+            del prediction
 
         if (len(output.shape) > 1) and output.shape[1] > 1:
             for i in range(output.shape[1]):

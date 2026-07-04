@@ -4,18 +4,20 @@ import polars as pl
 from typing import (
     Annotated,
     Literal,
-    NotRequired,
     Self,
     TypedDict,
     TYPE_CHECKING,
 )
 
+from prompt_toolkit import history
+
 if TYPE_CHECKING:
     from hgq.config import QuantizerConfig
-    from keras import Model, Sequential
+    from keras import Sequential
 
 from itertools import product
 from pydantic import (
+    AfterValidator,
     Field,
     ConfigDict,
     BaseModel,
@@ -124,34 +126,61 @@ type RingFractionType = Annotated[
 ]
 
 
-class FitMetricsDict(TypedDict):
+class HistoryTrainMetrics(TypedDict):
     loss: list[float]
     accuracy: list[float]
-    val_max_sp: list[float]
-    val_max_sp_pd: list[float]
-    val_max_sp_fa: list[float]
-    val_max_sp_threshold: list[float]
 
 
-class FitDict(FitRoutineDict):
-    train: FitMetricsDict
-    val: FitMetricsDict
+class HistoryValMetrics(TypedDict):
+    loss: list[float]
+    accuracy: list[float]
+    max_sp: list[float]
+    max_sp_pd: list[float]
+    max_sp_fa: list[float]
+    max_sp_threshold: list[float]
+    max_sp_best_epoch: list[int]
 
 
-class EvaluationDict(EnhancedConfusionMatrixDict):
+class HistoryDict(FitRoutineDict):
+    train: HistoryTrainMetrics
+    val: HistoryValMetrics
+
+
+class FitTrainMetrics(TypedDict):
     loss: float
-    weighted: NotRequired[EnhancedConfusionMatrixDict]
+    accuracy: float
 
 
-class RingerCommitteeKerasTrainingJobResults(TypedDict):
+class FitValMetrics(TypedDict):
+    loss: float
+    accuracy: float
+    max_sp: float
+    max_sp_pd: float
+    max_sp_fa: float
+    max_sp_threshold: float
+    max_sp_best_epoch: int
+
+
+class FitDict(TypedDict):
+    train: FitTrainMetrics
+    val: FitValMetrics
+
+
+# class EvaluationDict(EnhancedConfusionMatrixDict):
+#     loss: float
+#     weighted: NotRequired[EnhancedConfusionMatrixDict]
+
+
+class TrainingResult(TypedDict):
     fold: int
     init: int
     et_bin: BinDict
     eta_bin: AbsoluteBinDict
+    history: HistoryDict
     fit: FitDict
-    train: EvaluationDict
-    val: EvaluationDict
-    test: EvaluationDict
+    # train: EvaluationDict
+    # val: EvaluationDict
+    # test: EvaluationDict
 
 
 type PatienceType = Annotated[
@@ -162,11 +191,28 @@ type PatienceType = Annotated[
 ]
 
 
-class SelectionCriteria(BaseModel):
-    key: str = Field(
-        "val.max_sp.sp",
+def validate_selection_criteria_key(value: str) -> str:
+    valid_keys_list = [
+        f"fit.train.{metric}" for metric in FitTrainMetrics.__annotations__.keys()
+    ] + [f"fit.val.{metric}" for metric in FitValMetrics.__annotations__.keys()]
+    if value not in valid_keys_list:
+        raise ValueError(
+            f"Invalid selection criteria key: {value}. Must be one of {valid_keys_list}"
+        )
+    return value
+
+
+type SelectionCriteriaKeyType = Annotated[
+    str,
+    Field(
         description="Criterion to select the best model initilization or fold groups. Must be a key in the fit dictionary of the training results.",
-    )
+    ),
+    AfterValidator(validate_selection_criteria_key),
+]
+
+
+class SelectionCriteria(BaseModel):
+    key: SelectionCriteriaKeyType
     criterion: Literal["max", "min"] = Field(
         "max",
         description="How to select the best model from initilization or fold groups. Must be either 'max' or 'min'.",
@@ -324,7 +370,7 @@ class InferencePipeline:
                 self.committee.predict_polars,
                 all_layers=all_layers,
                 passthrough=passthrough,
-                batch_size=batch_size
+                batch_size=batch_size,
             )
         )
 
@@ -339,13 +385,16 @@ class InferencePipeline:
         keras_models: list["Sequential"],
         et_bins: list[BinDict],
         eta_bins: list[BinDict],
-        decision_thresholds: list[float],
+        decision_thresholds: list[float] | None = None,
     ) -> Self:
         preprocessing_pipeline = PreprocessingPipeline.from_job_params(
             rings_col=rings_col,
             ring_fraction=ring_fraction,
             norm_strategy=norm_strategy,
         )
+
+        if decision_thresholds is None:
+            decision_thresholds = (None for _ in range(len(keras_models)))
 
         abs_eta_col_name = cls.get_abs_eta_col_name(eta_col)
         binned_models = []
@@ -576,7 +625,6 @@ class MLPKerasTrainingJob(YamlBaseModel):
         keras_models = []
         et_bins = []
         eta_bins = []
-        decision_thresholds = []
 
         for row in self.selected_models.iter_rows(named=True):
             member_id = row["id"]
@@ -596,7 +644,6 @@ class MLPKerasTrainingJob(YamlBaseModel):
                     "closed": row["eta_bin.closed"],
                 }
             )
-            decision_thresholds.append(row["val.max_sp.threshold"])
 
         inference_pipeline = InferencePipeline.from_job_params(
             rings_col=rings_col,
@@ -607,7 +654,6 @@ class MLPKerasTrainingJob(YamlBaseModel):
             keras_models=keras_models,
             et_bins=et_bins,
             eta_bins=eta_bins,
-            decision_thresholds=decision_thresholds,
         )
 
         return inference_pipeline
@@ -699,16 +745,15 @@ class MLPKerasTrainingJob(YamlBaseModel):
             et_bin=et_bin,
             eta_bin=eta_bin,
         )
-        train_numpy = self.get_numpy_data(dataset.train_df())
-        val_numpy = self.get_numpy_data(dataset.val_df())
-        results: RingerCommitteeKerasTrainingJobResults = {
+
+        results: TrainingResult = {
             "fold": fold,
             "init": init,
             "et_bin": et_bin,
             "eta_bin": eta_bin,
         }
         output_dir = self.get_member_output_dir(member_id)
-        output_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
         model_factory = self.model_factory.model_copy(
             update=dict(name=f"{self.model_factory.name}_{member_id}")
         )
@@ -726,18 +771,18 @@ class MLPKerasTrainingJob(YamlBaseModel):
 
         from neuralnet.callbacks.keras import SP
 
+        train_data = self.get_numpy_data(dataset.train_df())
+        val_data = self.get_numpy_data(dataset.val_df())
+
         sp_callback = SP(
-            validation_data=val_numpy,
+            validation_data=val_data,
             patience=self.patience,
             verbose=self.verbose,
             save_the_best=True,
             from_logits=self.from_logits,
         )
         callbacks = [sp_callback]
-        train_data = self.get_numpy_data(dataset.train_df())
-        val_data = self.get_numpy_data(dataset.val_df())
-
-        model, results["fit"] = fit_routine(
+        model, results["history"] = fit_routine(
             model=model,
             train_data=train_data,
             val_data=val_data,
@@ -755,34 +800,46 @@ class MLPKerasTrainingJob(YamlBaseModel):
         model_path = self.get_member_model_path(output_dir)
         model.save(str(model_path))
 
-        results["train"] = self.run_evaluation(
-            model=model,
-            data=train_numpy,
-            class_weight=dataset.train_class_weights()
-            if self.balance_class_weights
-            else None,
-        )
-        del train_numpy
+        best_epoch = results["history"]["val"]["max_sp_best_epoch"][-1]
+        results["fit"] = {
+            "train": {
+                metric_name: metric_history[best_epoch]
+                for metric_name, metric_history in results["history"]["train"].items()
+            },
+            "val": {
+                metric_name: metric_history[best_epoch]
+                for metric_name, metric_history in results["history"]["val"].items()
+            },
+        }
 
-        results["val"] = self.run_evaluation(
-            model=model,
-            data=val_numpy,
-            class_weight=dataset.val_class_weights()
-            if self.balance_class_weights
-            else None,
-        )
-        del val_numpy
+        # results["train"] = self.run_evaluation(
+        #     model=model,
+        #     data=train_numpy,
+        #     class_weight=dataset.train_class_weights()
+        #     if self.balance_class_weights
+        #     else None,
+        # )
+        # del train_numpy
 
-        if not self.dry_run and hasattr(dataset, "test_df"):
-            test_numpy = self.get_numpy_data(dataset.test_df())
-            results["test"] = self.run_evaluation(
-                model=model,
-                data=test_numpy,
-                class_weight=dataset.test_class_weights()
-                if self.balance_class_weights
-                else None,
-            )
-            del test_numpy
+        # results["val"] = self.run_evaluation(
+        #     model=model,
+        #     data=val_numpy,
+        #     class_weight=dataset.val_class_weights()
+        #     if self.balance_class_weights
+        #     else None,
+        # )
+        # del val_numpy
+
+        # if not self.dry_run and hasattr(dataset, "test_df"):
+        #     test_numpy = self.get_numpy_data(dataset.test_df())
+        #     results["test"] = self.run_evaluation(
+        #         model=model,
+        #         data=test_numpy,
+        #         class_weight=dataset.test_class_weights()
+        #         if self.balance_class_weights
+        #         else None,
+        #     )
+        #     del test_numpy
 
         logger.info(f"Finished evaluating for fold {fold} and init {init}")
         zip_path = self.get_member_results_path(output_dir)
@@ -803,35 +860,35 @@ class MLPKerasTrainingJob(YamlBaseModel):
 
         clear_session()
 
-    def run_evaluation(
-        self,
-        model: "Model",
-        data: tuple[np.ndarray, np.ndarray],
-        class_weight: dict[int, float] | None = None,
-    ) -> EvaluationDict:
+    # def run_evaluation(
+    #     self,
+    #     model: "Model",
+    #     data: tuple[np.ndarray, np.ndarray],
+    #     class_weight: dict[int, float] | None = None,
+    # ) -> EvaluationDict:
 
-        predictions = model.predict(
-            data[0], batch_size=self.batch_size, verbose=self.verbose
-        )
-        if self.from_logits:
-            predictions = sigmoid(predictions)
-        eval_dict = enhanced_confusion_matrix_from_preds(data[1], predictions)
-        if class_weight:
-            weighted_eval_dict = {
-                "tn": np.array(eval_dict["tn"]) * class_weight[0],
-                "tp": np.array(eval_dict["tp"]) * class_weight[1],
-                "fn": np.array(eval_dict["fn"]) * class_weight[1],
-                "fp": np.array(eval_dict["fp"]) * class_weight[0],
-            }
-            weighted_enhanced_cm_dict = enhanced_confusion_matrix(
-                tn=weighted_eval_dict["tn"],
-                tp=weighted_eval_dict["tp"],
-                fn=weighted_eval_dict["fn"],
-                fp=weighted_eval_dict["fp"],
-                thresholds=np.array(eval_dict["thresholds"]),
-            )
-            eval_dict["weighted"] = weighted_enhanced_cm_dict
-        return eval_dict
+    #     predictions = model.predict(
+    #         data[0], batch_size=self.batch_size, verbose=self.verbose
+    #     )
+    #     if self.from_logits:
+    #         predictions = sigmoid(predictions)
+    #     eval_dict = enhanced_confusion_matrix_from_preds(data[1], predictions)
+    #     if class_weight:
+    #         weighted_eval_dict = {
+    #             "tn": np.array(eval_dict["tn"]) * class_weight[0],
+    #             "tp": np.array(eval_dict["tp"]) * class_weight[1],
+    #             "fn": np.array(eval_dict["fn"]) * class_weight[1],
+    #             "fp": np.array(eval_dict["fp"]) * class_weight[0],
+    #         }
+    #         weighted_enhanced_cm_dict = enhanced_confusion_matrix(
+    #             tn=weighted_eval_dict["tn"],
+    #             tp=weighted_eval_dict["tp"],
+    #             fn=weighted_eval_dict["fn"],
+    #             fp=weighted_eval_dict["fp"],
+    #             thresholds=np.array(eval_dict["thresholds"]),
+    #         )
+    #         eval_dict["weighted"] = weighted_enhanced_cm_dict
+    #     return eval_dict
 
     def post_training(self):
         logger = logging.getLogger(self.logger_name)
@@ -851,7 +908,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
             f"Computing best models based on the selection criteria: init: {self.best_init}, fold: {self.best_fold}"
         )
         all_model_results_df = pl.DataFrame(all_models_results).with_columns(
-            pl.col("fit.start").str.to_datetime(), pl.col("fit.end").str.to_datetime()
+            pl.col("history.start").str.to_datetime(), pl.col("history.end").str.to_datetime()
         )
         all_model_results_df.write_parquet(self.all_models_results_path)
 

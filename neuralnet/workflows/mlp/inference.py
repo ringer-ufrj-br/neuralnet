@@ -7,12 +7,10 @@ import json
 import polars as pl
 
 from ...submitit import ExecutorConfig
-from .training import MLPKerasTrainingJob
+from .training import MLPKerasTrainingJob, EtColType, EtaColType
 from ...datasets.ringer import (
     DataTableType,
     RingsColType,
-    EtColType,
-    EtaColType,
 )
 from ...datasets import DirectoryType, ParquetDataset
 from ...pydantic import YamlBaseModel
@@ -42,6 +40,9 @@ class InferenceJob(YamlBaseModel):
             description="Size of the batches to use for inference.",
         ),
     ] = 32
+
+    # Inference related fields
+    all_layers: bool = False
 
     # Output related fields
     output_table: Annotated[
@@ -75,7 +76,7 @@ class InferenceJob(YamlBaseModel):
             rings_col=self.rings_col,
         )
         logger.info(f"Loaded model, running inference on data table {self.data_table}")
-        prediction_df = inference_pipeline(data_table, self.batch_size)
+        prediction_df: pl.LazyFrame = inference_pipeline(data_table, self.batch_size, all_layers=self.all_layers)
         output_table_path = dataset.get_table_path(self.output_table)
         logger.info(f"Writing predictions to {output_table_path}")
         prediction_df.write_parquet(

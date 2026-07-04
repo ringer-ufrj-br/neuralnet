@@ -73,6 +73,14 @@ def training_job_test_routine(
         "output_path": None,  # To be set in the test
         "executor_config": None,  # To be set in the test
         "inits": 2,
+        "best_init": {
+            "key": "fit.val.max_sp",
+            "mode": "max",
+        },
+        "best_fold": {
+            "key": "fit.val.max_sp",
+            "mode": "max",
+        }
     }
 
     job_config["dataset_dir"] = dataset_dir
@@ -128,7 +136,7 @@ def training_job_test_routine(
         "label": pa.Column(pl.Boolean, nullable=False),
         "rings": pa.Column(pl.List(pl.Float32), nullable=False),
         "output": pa.Column(pl.Float32, nullable=False),
-        "prediction": pa.Column(pl.Boolean, nullable=False),
+        # "prediction": pa.Column(pl.Boolean, nullable=False),
     }
     for layer_config in job_config["model_factory"]["layers"]:
         for i in range(layer_config["units"]):
