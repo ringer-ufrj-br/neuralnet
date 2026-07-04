@@ -82,9 +82,9 @@ class RingerParquetDataset(ParquetDataset):
         fold_col = pl.col(self.fold_col)
         fold_df = self.get_dataframe(self.kfold_table)
         fold = pl.lit(self.fold, dtype=pl.dtype_of(fold_col))
-        is_test_col = label.is_not_null() & fold_col.is_not_null()
-        is_val_col = label.is_not_null() & fold_col == fold
-        is_train_col = label.is_not_null() & fold_col != fold
+        is_test_col = (label.is_not_null()) & (fold_col.is_not_null())
+        is_val_col = (label.is_not_null()) & (fold_col == fold)
+        is_train_col = (label.is_not_null()) & (fold_col != fold)
         fold_df = fold_df.with_columns(
             is_test_col.alias("is_test"),
             is_val_col.alias("is_val"),
