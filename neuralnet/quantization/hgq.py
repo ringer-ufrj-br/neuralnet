@@ -1,8 +1,9 @@
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Annotated, Literal, TYPE_CHECKING
+from typing import Annotated, Literal, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from keras import Sequential
+    from hgq.config import QuantizerConfig
 
 
 type PlaceType = Literal["kernel", "bias"]
@@ -41,8 +42,8 @@ class HGQFixedPointConfig(BaseModel):
 
 def hgq_quantize(
     model: "Sequential",
-    weight_quantizer_config: HGQFixedPointConfig,
-    bias_quantizer_config: HGQFixedPointConfig,
+    weight_quantizer_config: Union[HGQFixedPointConfig, 'QuantizerConfig'],
+    bias_quantizer_config: Union[HGQFixedPointConfig, 'QuantizerConfig'],
 ) -> "Sequential":
     from ..models.dense.hgq import keras_dense_to_hgq_dense
     from keras import Sequential, Input
@@ -50,6 +51,12 @@ def hgq_quantize(
 
     if not isinstance(model, Sequential):
         raise TypeError(f"Expected keras.Sequential model, got {type(model)}")
+    
+    if isinstance(weight_quantizer_config, HGQFixedPointConfig):
+        weight_quantizer_config = weight_quantizer_config.as_hgq_quantizer_config(place="weight")
+
+    if isinstance(bias_quantizer_config, HGQFixedPointConfig):
+        bias_quantizer_config = bias_quantizer_config.as_hgq_quantizer_config(place="bias")
 
     quantized_layers = [
         Input(shape=model.input_shape[1:]),
@@ -58,8 +65,8 @@ def hgq_quantize(
         if isinstance(layer, Dense):
             quantized_layer = keras_dense_to_hgq_dense(
                 layer,
-                kq_conf=weight_quantizer_config.as_hgq_quantizer_config(place="weight"),
-                bq_conf=bias_quantizer_config.as_hgq_quantizer_config(place="bias"),
+                kq_conf=weight_quantizer_config,
+                bq_conf=bias_quantizer_config
             )
             quantized_layers.append(quantized_layer)
         else:

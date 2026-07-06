@@ -9,7 +9,7 @@ from typing import (
     TYPE_CHECKING,
 )
 
-from prompt_toolkit import history
+from neuralnet import get_logger
 
 if TYPE_CHECKING:
     from hgq.config import QuantizerConfig
@@ -21,6 +21,7 @@ from pydantic import (
     Field,
     ConfigDict,
     BaseModel,
+    validate_call,
 )
 import logging
 from pathlib import Path
@@ -38,11 +39,6 @@ from ...datasets.ringer import (
     LabelColType,
     FoldColType,
 )
-from ...metrics import (
-    enhanced_confusion_matrix,
-    EnhancedConfusionMatrixDict,
-    enhanced_confusion_matrix_from_preds,
-)
 from ...models.keras.factories import (
     EpochsType,
     VerboseType,
@@ -53,17 +49,18 @@ from ...models.keras.factories import (
 from ...models.binned_committee import BinnedCommittee, BinnedModel, VariableBin
 from ...models.dense import MLPFactory
 from ...utils import traverse
-from ...normalizers.polars import AlternativeNorm1
+from ...normalizers.polars import AlternativeNorm1, FixedPointQuantizedAlternativeNorm1
 from ...utils.polars import RingSlicesPerLayer
 from ...datasets import DirectoryType
 from ...pydantic import YamlBaseModel
-from ...numpy import sigmoid
 from ...bins import (
     Bin,
     BinDict,
     AbsoluteBin,
     AbsoluteBinDict,
 )
+from ...quantization.hgq import HGQFixedPointConfig
+from ...quantization.quantizers import FixedPointQuantizer
 
 type BalanceClassWeightsType = Annotated[
     bool,
@@ -265,7 +262,9 @@ class PreprocessingPipeline:
     def __init__(
         self,
         ring_selector: RingSlicesPerLayer,
-        normalizer: AlternativeNorm1 | None = None,
+        normalizer: AlternativeNorm1
+        | FixedPointQuantizedAlternativeNorm1
+        | None = None,
     ):
         self.ring_selector = ring_selector
         self.normalizer = normalizer
@@ -319,6 +318,23 @@ class PreprocessingPipeline:
         if self.normalizer:
             data = data.pipe(self.normalizer, passthrough=passthrough)
         return data
+
+    def fixed_point_quantization(self, norm_quantizer: FixedPointQuantizer) -> Self:
+        if self.normalizer is None:
+            return self
+
+        if self.normalizer is None:
+            logger = get_logger()
+            logger.warning(
+                "Normalization strategy is None. Fixed Point quantization will not change the behavior."
+            )
+            quantized_normalizer = None
+        else:
+            quantized_normalizer = self.normalizer.fixed_point_quantization(
+                norm_quantizer
+            )
+
+        return PreprocessingPipeline(self.ring_selector, quantized_normalizer)
 
 
 class BinDict(TypedDict):
@@ -419,6 +435,28 @@ class InferencePipeline:
             committee=committee,
             eta_col=eta_col,
             et_col=et_col,
+        )
+
+    @validate_call
+    def fixed_point_quantization(
+        self,
+        norm_quantizer: FixedPointQuantizer,
+        weight_quantizer: HGQFixedPointConfig,
+        bias_quantizer: HGQFixedPointConfig ,
+    ) -> Self:
+
+        quantized_committee = self.committee.fixed_point_quantization(
+            weight_config=weight_quantizer,
+            bias_config=bias_quantizer,
+        )
+        preprocessing_pipeline = self.preprocessing_pipeline.fixed_point_quantization(
+            norm_quantizer=norm_quantizer
+        )
+        return InferencePipeline(
+            preprocessing_pipeline=preprocessing_pipeline,
+            committee=quantized_committee,
+            eta_col=self.eta_col,
+            et_col=self.et_col,
         )
 
 
@@ -800,6 +838,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
         model_path = self.get_member_model_path(output_dir)
         model.save(str(model_path))
 
+        # Best epoch starts at 1
         best_epoch = results["history"]["val"]["max_sp_best_epoch"][-1]
         results["fit"] = {
             "train": {
@@ -902,13 +941,18 @@ class MLPKerasTrainingJob(YamlBaseModel):
                     member_results = json.load(f)
 
             for key, value in traverse(member_results, include_sequences=False):
+                if value == "Infinity":
+                    value = float("inf")
+                elif value == "-Infinity":
+                    value = float("-inf")
                 all_models_results[key].append(value)
 
         logger.info(
             f"Computing best models based on the selection criteria: init: {self.best_init}, fold: {self.best_fold}"
         )
         all_model_results_df = pl.DataFrame(all_models_results).with_columns(
-            pl.col("history.start").str.to_datetime(), pl.col("history.end").str.to_datetime()
+            pl.col("history.start").str.to_datetime(),
+            pl.col("history.end").str.to_datetime(),
         )
         all_model_results_df.write_parquet(self.all_models_results_path)
 

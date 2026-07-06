@@ -15,6 +15,7 @@ from ...datasets.ringer import (
 from ...datasets import DirectoryType, ParquetDataset
 from ...pydantic import YamlBaseModel
 from ...quantization.hgq import HGQFixedPointConfig
+from ...quantization.quantizers import FixedPointQuantizer
 
 
 class InferenceJob(YamlBaseModel):
@@ -79,7 +80,61 @@ class InferenceJob(YamlBaseModel):
         prediction_df: pl.LazyFrame = inference_pipeline(data_table, self.batch_size, all_layers=self.all_layers)
         output_table_path = dataset.get_table_path(self.output_table)
         logger.info(f"Writing predictions to {output_table_path}")
-        prediction_df.write_parquet(
+        prediction_df.sink_parquet(
+            pl.PartitionBy(
+                str(output_table_path),
+                max_rows_per_file=self.max_rows_per_file,
+            )
+        )
+        return prediction_df
+
+
+class FixedPointInferenceJob(InferenceJob):
+    norm_quantizer: Annotated[
+        FixedPointQuantizer,
+        Field(
+            description="Fixed point quantizer to be used for the normalization of the rings data.",
+        )
+    ]
+    weight_quantizer: Annotated[
+        HGQFixedPointConfig,
+        Field(
+            description="Configuration for the weight quantization.",
+        ),
+    ]
+    bias_quantizer: Annotated[
+        HGQFixedPointConfig,
+        Field(
+            description="Configuration for the bias quantization.",
+        ),
+    ]
+
+    def submit(self) -> pl.LazyFrame:
+        logger = logging.getLogger()
+        logger.info(f"Starting fixed point inference job with fit_job_path {self.fit_job_path}")
+        training_job = MLPKerasTrainingJob.load(self.fit_job_path)
+        dataset = ParquetDataset(dataset_dir=self.dataset_dir)
+        data_table = dataset.get_dataframe(self.data_table)
+
+        if self.fold_col and self.kfold_table:
+            kfold_df = dataset.get_dataframe(self.kfold_table)
+            data_table = data_table.join(kfold_df, on="id", how="left")
+
+        inference_pipeline = training_job.get_inference_pipeline(
+            et_col=self.et_col,
+            eta_col=self.eta_col,
+            rings_col=self.rings_col,
+        )
+        inference_pipeline = inference_pipeline.fixed_point_quantization(
+            norm_quantizer=self.norm_quantizer,
+            weight_quantizer=self.weight_quantizer,
+            bias_quantizer=self.bias_quantizer,
+        )
+        logger.info(f"Loaded model, running inference on data table {self.data_table}")
+        prediction_df: pl.LazyFrame = inference_pipeline(data_table, self.batch_size, all_layers=self.all_layers)
+        output_table_path = dataset.get_table_path(self.output_table)
+        logger.info(f"Writing predictions to {output_table_path}")
+        prediction_df.sink_parquet(
             pl.PartitionBy(
                 str(output_table_path),
                 max_rows_per_file=self.max_rows_per_file,

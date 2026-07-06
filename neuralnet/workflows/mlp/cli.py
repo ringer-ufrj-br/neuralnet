@@ -3,7 +3,7 @@ from typing import Annotated
 from pathlib import Path
 from ...pydantic import pydantic_to_markdown_schema
 from .training import MLPKerasTrainingJob
-from .inference import InferenceJob, PTQConversionJob
+from .inference import InferenceJob, PTQConversionJob, FixedPointInferenceJob
 
 
 app = typer.Typer(help="MLP ringer command line interface", rich_markup_mode="markdown")
@@ -53,6 +53,28 @@ def inference(
     ],
 ):
     job = InferenceJob.from_yaml(config)
+    job.submit()
+
+
+@app.command(
+    short_help="Run fixed-point inference job",
+    help=(
+        "Run fixed-point inference job for the Ringer Committee Trigger for MLPs. "
+        "The configuration for the inference job is provided through a YAML file. "
+        "The YAML file should follow the schema bellow:\n\n"
+        f"{pydantic_to_markdown_schema(FixedPointInferenceJob)}"
+    ),
+)
+def fixed_point_inference(
+    config: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            help="Path to the YAML configuration file for the fixed-point inference job",
+        ),
+    ],
+):
+    job = FixedPointInferenceJob.from_yaml(config)
     job.submit()
 
 

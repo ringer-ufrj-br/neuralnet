@@ -58,6 +58,13 @@ class AlternativeNorm1(BaseModel):
                 )
 
         return self.get_polars_expr()
+    
+    def fixed_point_quantization(
+        self, quantizer: FixedPointQuantizer
+    ) -> "FixedPointQuantizedAlternativeNorm1":
+        return FixedPointQuantizedAlternativeNorm1(
+            input_cols=self.input_cols, suffix=self.suffix, quantizer=quantizer
+        )
 
     @overload
     def __call__(

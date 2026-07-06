@@ -32,6 +32,7 @@ class SP(Callback):
         self.count = 0
         self.__best_sp = -1.0
         self.__best_weights = None
+        self.__best_epoch = 0
         self.validation_data = validation_data
 
     def on_epoch_end(self, epoch, logs={}):
@@ -60,16 +61,18 @@ class SP(Callback):
             if self.save_the_best:
                 logger.info('Saving the best configuration here...')
                 self.__best_weights = self.model.get_weights()
-                logs['val_max_sp_best_epoch'] = epoch
+                self.__best_epoch = epoch
         elif round(sp[knee], 4) > round(self.__best_sp, 4):
             self.__best_sp = sp[knee]
             if self.save_the_best:
                 logger.info('Saving the best configuration here...')
                 self.__best_weights = self.model.get_weights()
-                logs['val_max_sp_best_epoch'] = epoch
+                self.__best_epoch = epoch
             self.count = 0
         else:
             self.count += 1
+        
+        logs['val_max_sp_best_epoch'] = self.__best_epoch
 
         if self.count > self.patience:
             logger.info('Stopping the Training by SP...')

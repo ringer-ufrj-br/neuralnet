@@ -8,9 +8,7 @@ from torch.nn import Sequential
 from ..bins import VariableBin
 
 if TYPE_CHECKING:
-    from hgq.config import QuantizerConfig
-
-type QuantizerConfigType = "QuantizerConfig" | None
+    from ..quantization.hgq import HGQFixedPointConfig
 
 
 def features_validator(value: Any) -> list[str]:
@@ -237,13 +235,13 @@ class BinnedModel:
                 f"Unsupported data type for prediction: {type(data)}. Expected polars DataFrame, polars LazyFrame, or numpy ndarray."
             )
 
-    def quantize(
-        self, kq_conf: QuantizerConfigType = None, bq_conf: QuantizerConfigType = None
+    def fixed_point_quantization(
+        self, weight_config: 'HGQFixedPointConfig' = None, bias_config: 'HGQFixedPointConfig' = None
     ) -> Self:
         from ..quantization.hgq import hgq_quantize
 
         quantized_keras_model = hgq_quantize(
-            self.keras_model, kq_conf=kq_conf, bq_conf=bq_conf
+            self.keras_model, weight_quantizer_config=weight_config, bias_quantizer_config=bias_config
         )
 
         quantized_binned_model = BinnedModel(
@@ -323,8 +321,8 @@ class BinnedCommittee:
                 f"Unsupported data type for prediction: {type(data)}. Expected polars DataFrame or polars LazyFrame."
             )
 
-    def quantize(
-        self, kq_conf: QuantizerConfigType = None, bq_conf: QuantizerConfigType = None
+    def fixed_point_quantization(
+        self, weight_config: 'HGQFixedPointConfig' = None, bias_config: 'HGQFixedPointConfig' = None
     ) -> Self:
-        quantized_models = [model.quantize(kq_conf, bq_conf) for model in self.models]
-        return self.model_copy(update={"models": quantized_models})
+        quantized_models = [model.fixed_point_quantization(weight_config, bias_config) for model in self.models]
+        return BinnedCommittee(models=quantized_models)
