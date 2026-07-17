@@ -443,11 +443,13 @@ class InferencePipeline:
         norm_quantizer: FixedPointQuantizer,
         weight_quantizer: HGQFixedPointConfig,
         bias_quantizer: HGQFixedPointConfig ,
+        backend: str = 'hgq'
     ) -> Self:
 
         quantized_committee = self.committee.fixed_point_quantization(
             weight_config=weight_quantizer,
             bias_config=bias_quantizer,
+            backend=backend
         )
         preprocessing_pipeline = self.preprocessing_pipeline.fixed_point_quantization(
             norm_quantizer=norm_quantizer

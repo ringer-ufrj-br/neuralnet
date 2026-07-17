@@ -1,3 +1,9 @@
+"""Factory models for building KAN components from validated configs.
+
+This module groups Pydantic-based factories used to create KAN layers and KAN
+models for PyTorch and Keras integration.
+"""
+
 from typing import Annotated, Annotated, Literal
 from pydantic import BaseModel, Field
 
@@ -22,6 +28,8 @@ type SplineOrderType = Annotated[
 
 
 class KAN1DLayerFactory(BaseModel):
+    """Pydantic factory for a single 1D KAN layer."""
+
     input_size: int = Field(..., description="The input size.", gt=0)
     output_size: int = Field(..., description="The output size.", gt=0)
     grid_size: GridSizeType
@@ -37,6 +45,20 @@ class KAN1DLayerFactory(BaseModel):
     )
 
     def as_torch(self):
+        """Build an ``efficient_kan.KAN`` layer for PyTorch.
+
+        Returns
+        -------
+        efficient_kan.KAN
+            KAN module configured as a single layer transform.
+
+        Raises
+        ------
+        ValueError
+            If ``name`` is provided, since naming is not supported for the
+            generated PyTorch layer.
+        """
+
         from efficient_kan import KAN
 
         if self.name is not None:
@@ -49,6 +71,19 @@ class KAN1DLayerFactory(BaseModel):
         )
 
     def as_keras(self):
+        """Build a Keras wrapper for the generated PyTorch KAN layer.
+
+        Returns
+        -------
+        keras.layers.TorchModuleWrapper
+            Keras layer wrapping the underlying PyTorch KAN module.
+
+        Raises
+        ------
+        ValueError
+            If the active Keras backend is not ``torch``.
+        """
+
         import keras
         from keras.layers import TorchModuleWrapper
 
@@ -74,6 +109,8 @@ type ModelShapeElementType = Annotated[
 
 
 class KANModelFactory(BaseModel):
+    """Pydantic factory for a multi-layer 1D KAN model."""
+
     model_shape: list[ModelShapeElementType] = Field(
         ...,
         description="The shape of the KAN model, defined as a list of layer sizes transformations. It should start with the input size and end with the output size.",
@@ -96,6 +133,20 @@ class KANModelFactory(BaseModel):
     )
 
     def as_torch(self):
+        """Build an ``efficient_kan.KAN`` model for PyTorch.
+
+        Returns
+        -------
+        efficient_kan.KAN
+            KAN module configured from the full model shape.
+
+        Raises
+        ------
+        ValueError
+            If ``name`` is provided, since naming is not supported for the
+            generated PyTorch layer.
+        """
+
         from efficient_kan import KAN
 
         if self.name is not None:
@@ -108,6 +159,19 @@ class KANModelFactory(BaseModel):
         )
 
     def as_keras(self):
+        """Build a Keras model that wraps the generated PyTorch KAN module.
+
+        Returns
+        -------
+        keras.Model
+            Keras model exposing the wrapped KAN module as its output.
+
+        Raises
+        ------
+        ValueError
+            If the active Keras backend is not ``torch``.
+        """
+
         from keras.config import backend
         from keras.layers import TorchModuleWrapper
         from keras import Input, Model
