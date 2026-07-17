@@ -145,6 +145,8 @@ def plot_variable_distribution_comparison(
     scale: Literal["linear", "log"] = "linear",
     top_legend_kwargs: dict | None = None,
     bottom_legend_kwargs: dict | None = None,
+    bottom_ax_set: dict | None = None,
+    scatter: bool = False
 ) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
     if fig_kwargs is None:
         fig = plt.figure()
@@ -184,11 +186,22 @@ def plot_variable_distribution_comparison(
     bottom_ax = fig.add_subplot(grid_spec[6:, 0])
     ref_heights, ref_bins, _ = top_ax.hist(
         data[ref["name"]].to_numpy(),
-        label=ref["label"],
+        label=ref["label"] if not scatter else None,
         color=ref["color"],
         histtype="step",
         **hist_kwargs,
     )
+    if scatter:
+        ref_scatter_x = (ref_bins[:-1] + ref_bins[1:]) / 2
+        top_ax.scatter(
+            ref_scatter_x,
+            y=ref_heights,
+            label=ref["label"],
+            color=ref["color"],
+            marker=ref['marker'] if 'marker' in ref else 'o',
+            edgecolor='k',
+            alpha=0.5,
+        )
 
     # Removes 'bins' from hist_kwargs to avoid passing it again in the loop below
     if "bins" in hist_kwargs:
@@ -197,12 +210,22 @@ def plot_variable_distribution_comparison(
     for var in to_compare:
         heights, _, _ = top_ax.hist(
             data[var["name"]].to_numpy(),
-            label=var["label"],
+            label=var["label"] if not scatter else None,
             color=var["color"],
             bins=ref_bins,
             histtype="step",
             **hist_kwargs,
         )
+        if scatter:
+            top_ax.scatter(
+                ref_scatter_x,
+                y=heights,
+                label=var["label"],
+                color=var["color"],
+                marker=var['marker'] if 'marker' in var else 'o',
+                edgecolor='k',
+                alpha=0.5,
+            )
         rel_diff = ((heights - ref_heights) / ref_heights) * 100
         bottom_ax.bar(
             x=ref_bins[:-1],
@@ -227,6 +250,8 @@ def plot_variable_distribution_comparison(
     bottom_ax.set_ylabel(f"Diff to {ref['label']} (%)", fontsize='medium')
     bottom_ax.tick_params(axis="x", which="both", labelsize='small',)
     bottom_ax.tick_params(axis="y", which="both", labelsize='small',)
+    if bottom_ax_set is not None:
+        bottom_ax.set(**bottom_ax_set)
 
     top_ax.legend(**top_legend_kwargs)
     bottom_ax.legend(**bottom_legend_kwargs)
