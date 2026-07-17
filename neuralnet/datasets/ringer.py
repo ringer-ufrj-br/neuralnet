@@ -1,3 +1,9 @@
+"""Utilities for working with ringer parquet datasets.
+
+This module provides a Pydantic-backed dataset wrapper plus helpers for
+building fold splits, sample weights, and synthetic ringer-like data.
+"""
+
 from typing import Annotated, Literal, ClassVar
 from pydantic import ConfigDict, Field
 import polars as pl
@@ -40,6 +46,20 @@ type DataGroupType = Literal["train", "val", "test", "predict"]
 
 
 class RingerParquetDataset(ParquetDataset):
+    """Dataset wrapper for ringer parquet data and fold-based evaluation.
+
+    The dataset stores the names of the parquet tables and columns required to
+    access the rings features and the k-fold labels. Individual field
+    descriptions are declared on the Pydantic annotations.
+
+    The data is organized around a labeled k-fold table joined to the main data
+    table by ``id``. The ``train`` and ``val`` splits are selected from the
+    labeled rows using the configured fold index, while ``test`` is the union of
+    those labeled rows. The ``predict`` split extends ``test`` with the
+    unlabeled rows present in the original tables, allowing inference on both
+    held-out labeled samples and unlabeled data.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     N_RINGS: ClassVar[int] = 100
@@ -58,6 +78,14 @@ class RingerParquetDataset(ParquetDataset):
     eta_bin: EtaBinType = None
 
     def get_n_folds(self) -> int:
+        """Return the number of cross-validation folds in the dataset.
+
+        Returns
+        -------
+        int
+            Total number of folds, inferred from the maximum fold index in the
+            k-fold table.
+        """
         n_folds = (
             self.get_dataframe(self.kfold_table)
             .filter(pl.col(self.fold_col).is_not_null())
@@ -67,16 +95,25 @@ class RingerParquetDataset(ParquetDataset):
         )
         return n_folds + 1  # Folds are 0-indexed
 
-    def open_rings_expr(self) -> tuple[list[pl.Expr], list[str]]:
-        rings = []
-        names = []
-        for ring_idx in range(self.N_RINGS):
-            name = f"{self.rings_col}.{ring_idx}"
-            names.append(name)
-            rings.append(pl.col(self.rings_col).list.get(ring_idx).alias(name))
-        return rings, names
-
     def get_fold_data(self, group: DataGroupType) -> pl.LazyFrame:
+        """Return the lazy frame for a specific dataset split.
+
+        Parameters
+        ----------
+        group : {"train", "val", "test", "predict"}
+            Dataset split to retrieve.
+
+        Returns
+        -------
+        polars.LazyFrame
+            Lazy frame containing the selected split joined with the data
+            table.
+
+        Raises
+        ------
+        ValueError
+            If ``group`` is not one of the supported split names.
+        """
 
         label = pl.col(self.label_col)
         fold_col = pl.col(self.fold_col)
@@ -114,6 +151,23 @@ class RingerParquetDataset(ParquetDataset):
         return return_df
 
     def get_class_weights(self, group: DataGroupType) -> dict[int, float]:
+        """Compute inverse-frequency class weights for a split.
+
+        Parameters
+        ----------
+        group : {"train", "val", "test", "predict"}
+            Dataset split used to compute the class distribution.
+
+        Returns
+        -------
+        dict[int, float]
+            Mapping from class label to weight.
+
+        Raises
+        ------
+        ValueError
+            If ``group`` is not one of the supported split names.
+        """
         match group:
             case "train":
                 df = self.train_df()
@@ -151,6 +205,18 @@ class RingerParquetDataset(ParquetDataset):
         return class_weights
 
     def get_sample_weights_expr(self, group: DataGroupType) -> pl.Expr:
+        """Return a Polars expression that maps labels to sample weights.
+
+        Parameters
+        ----------
+        group : {"train", "val", "test", "predict"}
+            Dataset split used to compute the class weights.
+
+        Returns
+        -------
+        polars.Expr
+            Expression that produces a ``sample_weight`` column.
+        """
         class_weights = self.get_class_weights(group)
         weights_expr = pl.col(self.label_col).cast(pl.Float64).replace(class_weights).alias(
             "sample_weight"
@@ -158,43 +224,67 @@ class RingerParquetDataset(ParquetDataset):
         return weights_expr
 
     def get_sample_weights(self, group: DataGroupType) -> pl.LazyFrame:
+        """Return the sample-weight column for a dataset split.
+
+        Parameters
+        ----------
+        group : {"train", "val", "test", "predict"}
+            Dataset split used to compute the weights.
+
+        Returns
+        -------
+        polars.LazyFrame
+            Lazy frame containing the sample weights.
+        """
         expr = self.get_sample_weights_expr(group)
         return self.get_fold_data(group).select(expr)
 
     def train_df(self) -> pl.LazyFrame:
+        """Return the training split as a lazy frame."""
         return self.get_fold_data("train")
 
     def train_class_weights(self) -> dict[int, float]:
+        """Return the training-split class weights."""
         return self.get_class_weights("train")
 
     def train_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
+        """Return the training-split sample weights as a NumPy array."""
         return self.get_sample_weights("train").collect().to_numpy().flatten()
 
     def val_df(self) -> pl.LazyFrame:
+        """Return the validation split as a lazy frame."""
         return self.get_fold_data("val")
 
     def val_class_weights(self) -> dict[int, float]:
+        """Return the validation-split class weights."""
         return self.get_class_weights("val")
 
     def val_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
+        """Return the validation-split sample weights as a NumPy array."""
         return self.get_sample_weights("val").collect().to_numpy().flatten()
 
     def test_df(self) -> pl.LazyFrame:
+        """Return the test split as a lazy frame."""
         return self.get_fold_data("test")
 
     def test_class_weights(self) -> dict[int, float]:
+        """Return the test-split class weights."""
         return self.get_class_weights("test")
 
     def test_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
+        """Return the test-split sample weights as a NumPy array."""
         return self.get_sample_weights("test").collect().to_numpy().flatten()
 
     def predict_class_weights(self) -> dict[int, float]:
+        """Return the prediction-split class weights."""
         return self.get_class_weights("predict")
 
     def predict_sample_weights(self) -> np.ndarray[tuple[int], np.floating]:
+        """Return the prediction-split sample weights as a NumPy array."""
         return self.get_sample_weights("predict").collect().to_numpy().flatten()
 
     def predict_df(self) -> pl.LazyFrame:
+        """Return the prediction split as a lazy frame."""
         return self.get_fold_data("predict")
 
 
@@ -205,6 +295,26 @@ def generate_ringer_dataset_dfs(
     n_folds: int = 5,
     random_state: int = 42,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Generate synthetic ringer-like data and fold assignment tables.
+
+    Parameters
+    ----------
+    et_bins : list[Bin or BinDict]
+        Bins used to generate the ``et`` feature values.
+    eta_bins : list[Bin or BinDict]
+        Bins used to generate the ``eta`` feature values.
+    samples_per_bin : int, default=1000
+        Number of synthetic samples to generate for each bin combination.
+    n_folds : int, default=5
+        Number of folds to draw when assigning fold labels.
+    random_state : int, default=42
+        Seed forwarded to the blob generator.
+
+    Returns
+    -------
+    tuple[polars.DataFrame, polars.DataFrame]
+        A pair containing the data table and the k-fold table, respectively.
+    """
     from sklearn.datasets import make_blobs
     for i in range(len(et_bins)):
         et_bins[i] = et_bins[i] if isinstance(et_bins[i], Bin) else Bin(**et_bins[i])
