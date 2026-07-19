@@ -462,7 +462,7 @@ class InferencePipeline:
         )
 
 
-class MLPKerasTrainingJob(YamlBaseModel):
+class RingerKerasTrainingJob(YamlBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     # Dataset params
@@ -732,7 +732,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
             for member_id, (et_bin, eta_bin, fold, init) in enumerate(iterator):
                 member_output_path = self.get_member_output_dir(member_id)
                 try:
-                    MLPKerasTrainingJob.validate_saved_member_directory(
+                    RingerKerasTrainingJob.validate_saved_member_directory(
                         member_output_path
                     )
                     logger.info(
@@ -991,7 +991,7 @@ class MLPKerasTrainingJob(YamlBaseModel):
             raise FileNotFoundError(f"Selected models file not found in {output_path}.")
 
         for member_output_path in output_path.glob("member_*"):
-            MLPKerasTrainingJob.validate_saved_member_directory(member_output_path)
+            RingerKerasTrainingJob.validate_saved_member_directory(member_output_path)
 
     @staticmethod
     def validate_saved_member_directory(member_output_path: Path | str):

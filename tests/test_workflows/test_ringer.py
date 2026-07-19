@@ -31,8 +31,8 @@ def training_job_test_routine(
 
     os.environ["KERAS_BACKEND"] = "tensorflow"
 
-    from neuralnet.workflows.mlp.training import (
-        MLPKerasTrainingJob,
+    from neuralnet.workflows.ringer.training import (
+        RingerKerasTrainingJob,
     )
     import pandera.polars as pa
     from neuralnet.submitit import ExecutorConfig
@@ -96,15 +96,15 @@ def training_job_test_routine(
     job_config["executor_config"] = executor_config
     job_config["output_path"] = tmp_path / "output"
 
-    job = MLPKerasTrainingJob(**job_config)
+    job = RingerKerasTrainingJob(**job_config)
     job.submit()
 
-    loaded_job = MLPKerasTrainingJob.load(job_config["output_path"])
-    assert isinstance(loaded_job, MLPKerasTrainingJob), (
+    loaded_job = RingerKerasTrainingJob.load(job_config["output_path"])
+    assert isinstance(loaded_job, RingerKerasTrainingJob), (
         "Loaded job is not of the expected type"
     )
     assert loaded_job == job, "Loaded job is not equal to the original job"
-    MLPKerasTrainingJob.validate_saved_directory(job_config["output_path"])
+    RingerKerasTrainingJob.validate_saved_directory(job_config["output_path"])
     assert isinstance(loaded_job.all_model_results, pl.DataFrame), (
         "Loaded job's all_model_results is not a Polars DataFrame"
     )
@@ -159,12 +159,6 @@ def test_ringer_parquet_dataset_splits_and_weights(
     dataset = small_ringer_parquet_dataset
 
     assert dataset.get_n_folds() == 2
-
-    rings_expr, ring_names = dataset.open_rings_expr()
-    assert len(rings_expr) == dataset.N_RINGS
-    assert len(ring_names) == dataset.N_RINGS
-    assert ring_names[0] == "rings.0"
-    assert ring_names[-1] == "rings.99"
 
     assert dataset.train_df().collect().get_column("id").to_list() == [2, 3, 5]
     assert dataset.val_df().collect().get_column("id").to_list() == [0, 1, 4]

@@ -7,7 +7,7 @@ import json
 import polars as pl
 
 from ...submitit import ExecutorConfig
-from .training import MLPKerasTrainingJob, EtColType, EtaColType
+from .training import RingerKerasTrainingJob, EtColType, EtaColType
 from ...datasets.ringer import (
     DataTableType,
     RingsColType,
@@ -23,7 +23,7 @@ class InferenceJob(YamlBaseModel):
     fit_job_path: Annotated[
         Path,
         Field(
-            description="Path to the outut path from a MLPKerasTrainingJob. This is used to load the selected models for inference.",
+            description="Path to the outut path from a RingerKerasTrainingJob. This is used to load the selected models for inference.",
         ),
     ]
 
@@ -63,7 +63,7 @@ class InferenceJob(YamlBaseModel):
     def submit(self) -> pl.LazyFrame:
         logger = logging.getLogger()
         logger.info(f"Starting inference job with fit_job_path {self.fit_job_path}")
-        training_job = MLPKerasTrainingJob.load(self.fit_job_path)
+        training_job = RingerKerasTrainingJob.load(self.fit_job_path)
         dataset = ParquetDataset(dataset_dir=self.dataset_dir)
         data_table = dataset.get_dataframe(self.data_table)
 
@@ -112,7 +112,7 @@ class FixedPointInferenceJob(InferenceJob):
     def submit(self) -> pl.LazyFrame:
         logger = logging.getLogger()
         logger.info(f"Starting fixed point inference job with fit_job_path {self.fit_job_path}")
-        training_job = MLPKerasTrainingJob.load(self.fit_job_path)
+        training_job = RingerKerasTrainingJob.load(self.fit_job_path)
         dataset = ParquetDataset(dataset_dir=self.dataset_dir)
         data_table = dataset.get_dataframe(self.data_table)
 
@@ -210,7 +210,7 @@ class PTQConversionJob(InferenceJob):
         )
         executor = self.executor_config.get_executor()
         submitted_jobs = []
-        training_job = MLPKerasTrainingJob.load(self.fit_job_path)
+        training_job = RingerKerasTrainingJob.load(self.fit_job_path)
         with executor.batch():
             length = len(training_job.selected_models)
             for i, model_result in enumerate(
@@ -251,7 +251,7 @@ class PTQConversionJob(InferenceJob):
         logger.info(
             f"{submission_id}:Running evaluation for PTQ conversion job with fit_job_path {self.fit_job_path}"
         )
-        training_job = MLPKerasTrainingJob.load(self.fit_job_path)
+        training_job = RingerKerasTrainingJob.load(self.fit_job_path)
         member_output_path = self.output_path / f"member_{member_id}"
         # if member_output_path.exists():
         #     return
@@ -312,7 +312,7 @@ class PTQConversionJob(InferenceJob):
         from ...utils import traverse
 
         logger = logging.getLogger()
-        training_job = MLPKerasTrainingJob.load(self.fit_job_path)
+        training_job = RingerKerasTrainingJob.load(self.fit_job_path)
         all_models_results = defaultdict(list)
         for member_path in self.output_path.glob("member_*"):
             member_id = int(member_path.name.split("_")[-1])

@@ -15,7 +15,7 @@ def hgqdense_from_keras_dense_copies_configuration_and_weights():
 
     import keras
     from hgq.layers import QDense
-    from neuralnet.models.dense.hgq import keras_dense_to_hgq_dense
+    from neuralnet.quantization.hgq import keras_dense_to_hgq_dense
 
     keras_layer = keras.layers.Dense(
         units=3,

@@ -2,11 +2,11 @@ import typer
 from typing import Annotated
 from pathlib import Path
 from ...pydantic import pydantic_to_markdown_schema
-from .training import MLPKerasTrainingJob
+from .training import RingerKerasTrainingJob
 from .inference import InferenceJob, PTQConversionJob, FixedPointInferenceJob
 
 
-app = typer.Typer(help="MLP ringer command line interface", rich_markup_mode="markdown")
+app = typer.Typer(help="Ringer Committee command line interface", rich_markup_mode="markdown")
 
 
 RUN_TRAINING_HELP = "Run Ringer Committtee Trigger Training jobs"
@@ -16,10 +16,10 @@ RUN_TRAINING_HELP = "Run Ringer Committtee Trigger Training jobs"
     short_help=RUN_TRAINING_HELP,
     help=(
         f"{RUN_TRAINING_HELP}\n\n"
-        "This command runs the training jobs for the Ringer Committee Trigger for MLPs. "
+        "This command runs the training jobs for the Ringer Committee Trigger. "
         "The configuration for the training jobs is provided through a YAML file. "
         "The YAML file should follow the schema bellow:\n\n"
-        f"{pydantic_to_markdown_schema(MLPKerasTrainingJob)}"
+        f"{pydantic_to_markdown_schema(RingerKerasTrainingJob)}"
     ),
 )
 def training(
@@ -31,7 +31,7 @@ def training(
     ],
 ):
 
-    job = MLPKerasTrainingJob.from_yaml(config)
+    job = RingerKerasTrainingJob.from_yaml(config)
     job.submit()
 
 

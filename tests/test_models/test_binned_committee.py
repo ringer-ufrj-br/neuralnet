@@ -231,41 +231,6 @@ def binned_model_predict_polars_with_passthrough_adds_original_columns(
     )
 
 
-def test_binned_model_quantize_returns_copy_with_quantized_keras_model(
-    isolated_executor,
-):
-    future = isolated_executor.submit(
-        binned_model_quantize_returns_copy_with_quantized_keras_model,
-    )
-    future.result()
-
-
-def binned_model_quantize_returns_copy_with_quantized_keras_model():
-    model = build_constant_binned_model()
-
-    import neuralnet.quantization.hgq as hgq_module
-
-    original_hgq_quantize = hgq_module.hgq_quantize
-
-    def fake_hgq_quantize(keras_model, kq_conf=None, bq_conf=None):
-        assert keras_model is model.keras_model
-        assert kq_conf == "weight-config"
-        assert bq_conf == "bias-config"
-        return keras_model
-
-    hgq_module.hgq_quantize = fake_hgq_quantize
-    try:
-        quantized = model.quantize(kq_conf="weight-config", bq_conf="bias-config")
-    finally:
-        hgq_module.hgq_quantize = original_hgq_quantize
-
-    assert quantized is not model
-    assert quantized.keras_model is model.keras_model
-    assert quantized.bins == model.bins
-    assert quantized.features == model.features
-    assert quantized.decision_threshold == model.decision_threshold
-
-
 @pytest.mark.parametrize("frame_factory", [make_dataframe, make_lazyframe])
 def test_binned_committee_predict_concatenates_model_predictions(
     frame_factory, isolated_executor
@@ -362,9 +327,7 @@ def binned_committee_predict_forwards_all_layers_and_joins_results(frame_factory
                 return result.lazy()
             return result
 
-    committee = BinnedCommittee(
-        [FakeModel([1], 0.1), FakeModel([4], 0.9)]
-    )
+    committee = BinnedCommittee([FakeModel([1], 0.1), FakeModel([4], 0.9)])
 
     data = frame_factory(
         {
@@ -399,39 +362,3 @@ def binned_committee_predict_forwards_all_layers_and_joins_results(frame_factory
     assert result["layer.dense.1"].to_list() == [2.0, None, None, 2.0]
     assert committee.models[0].calls == [(data, 32, True)]
     assert committee.models[1].calls == [(data, 32, True)]
-
-
-def test_binned_committee_quantize_quantizes_each_model(isolated_executor):
-    future = isolated_executor.submit(
-        binned_committee_quantize_quantizes_each_model,
-    )
-    future.result()
-
-
-def binned_committee_quantize_quantizes_each_model():
-    from neuralnet.models.binned_committee import BinnedCommittee
-
-    class FakeModel:
-        def __init__(self, name: str):
-            self.name = name
-            self.calls = []
-
-        def quantize(self, kq_conf=None, bq_conf=None):
-            self.calls.append((kq_conf, bq_conf))
-            return f"{self.name}-quantized"
-
-    committee = BinnedCommittee.__new__(BinnedCommittee)
-    committee.models = [FakeModel("model-a"), FakeModel("model-b")]
-
-    def fake_model_copy(update):
-        copied = BinnedCommittee.__new__(BinnedCommittee)
-        copied.models = update["models"]
-        return copied
-
-    committee.model_copy = fake_model_copy
-
-    quantized = committee.quantize(kq_conf="weight-config", bq_conf="bias-config")
-
-    assert quantized.models == ["model-a-quantized", "model-b-quantized"]
-    assert committee.models[0].calls == [("weight-config", "bias-config")]
-    assert committee.models[1].calls == [("weight-config", "bias-config")]

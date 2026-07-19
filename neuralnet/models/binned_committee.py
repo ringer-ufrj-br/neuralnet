@@ -10,7 +10,9 @@ import polars as pl
 import numpy as np
 import logging
 
-from torch.nn import Sequential
+if TYPE_CHECKING:
+    from keras import Sequential
+
 from ..bins import VariableBin
 
 if TYPE_CHECKING:
@@ -59,6 +61,7 @@ class BinnedModel:
             Optional threshold used to derive a boolean ``prediction`` column.
         """
 
+        from keras import Sequential
         self.bins = bins
         if not isinstance(keras_model, Sequential):
             raise TypeError(
