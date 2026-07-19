@@ -1,59 +1,22 @@
-from typing import Iterable, Iterator
+from typing import Self
 from pathlib import Path
-from pydantic import BaseModel
+from abc import ABC
+from pydantic import BaseModel, ConfigDict
 from pydantic.fields import PydanticUndefined
 
 
-def walk_paths(
-    paths: str | Path | Iterable[str | Path], file_ext: str, dev: bool = False
-) -> Iterator[Path]:
-    """
-    Generator that opens all directories in an iterator for
-    a specific file extension. This is useful for script cases where
-    an user can pass a mix of directories and filepaths.
+class YamlBaseModel(BaseModel, ABC):
+    model_config = ConfigDict(extra="forbid")
 
-    Parameters
-    ----------
-    paths : str | Path | Iterable[str | Path]
-        A single path or an iterable of paths. These can be directories or
-        file paths. If a directory is provided, it will search recursively
-        for files with the specified file extension.
-    file_ext : str
-        The desired file extension to look for
-    dev: bool
-        If True, the function will yield just the first file found
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> Self:
+        import yaml
 
-    Yields
-    ------
-    Path
-        The path to a file
-
-    Raises
-    ------
-    ValueError
-        Raised if there is a file that does not have file_ext as its extension
-    """
-    if isinstance(paths, str):
-        paths = [Path(paths)]
-    elif isinstance(paths, Path):
-        paths = [paths]
-    i = 0
-    for ipath in paths:
-        if ipath.is_file():
-            if ipath.suffix != f".{file_ext}":
-                raise ValueError(
-                    f"File {ipath} does not have the expected extension .{file_ext}"
-                )
-            yield ipath
-            i += 1
-            if dev and i > 0:
-                break
-        else:
-            for filepath in ipath.glob(f"**/*.{file_ext}"):
-                yield filepath
-                i += 1
-                if dev and i > 0:
-                    break
+        if isinstance(path, str):
+            path = Path(path)
+        with path.open("r") as f:
+            data = yaml.safe_load(f)
+        return cls(**data)
 
 
 def pydantic_to_markdown_schema(model_class: type[BaseModel], indent: int = 0) -> str:

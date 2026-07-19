@@ -222,3 +222,6 @@ out/
 
 # Misc
 jobs/**
+
+# Example related
+**/dataset/**
