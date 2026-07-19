@@ -587,9 +587,13 @@ class RingerKerasTrainingJob(YamlBaseModel):
                 f"Selected models file not found at {selected_models_path}"
             )
         return pl.read_parquet(selected_models_path)
+    
+    @cached_property
+    def models_output_dir(self) -> Path:
+        return self.output_path / "models"
 
     def get_member_output_dir(self, member_id: int) -> Path:
-        return self.output_path / f"member_{member_id}"
+        return self.models_output_dir / f"member_{member_id}"
 
     def get_member_model_path(self, member: Path | int) -> Path:
         if isinstance(member, int):
@@ -934,7 +938,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
     def post_training(self):
         logger = logging.getLogger(self.logger_name)
         all_models_results = defaultdict(list)
-        for member_path in self.output_path.glob("member_*"):
+        for member_path in self.models_output_dir.glob("member_*"):
             member_id = int(member_path.name.split("_")[-1])
             all_models_results["id"].append(member_id)
             results_path = self.get_member_results_path(member_path)
