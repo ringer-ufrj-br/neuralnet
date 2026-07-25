@@ -222,3 +222,13 @@ out/
 
 # Misc
 jobs/**
+
+# Example related
+**/dataset/**
+
+# Data
+references/
+mc21_isabela_qt_2sigma_restriction/
+
+# QAT models
+ringer_v0_qat/

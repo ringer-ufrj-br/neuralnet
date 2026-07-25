@@ -1,0 +1,95 @@
+import pytest
+import numpy as np
+
+
+@pytest.mark.parametrize(
+    ("class_name", "kwargs", "name"),
+    [
+        (
+            "BasicEntanglerQuantumLayer",
+            {
+                "n_qubits": 2,
+                "n_layers": 2,
+                "name": "basic_entangler",
+                "shots": None,
+                "diff_method": "backprop",
+            },
+            "basic_entangler",
+        ),
+        (
+            "StronglyEntanglingQuantumLayer",
+            {
+                "n_qubits": 3,
+                "n_layers": 1,
+                "name": "strongly_entangling",
+                "shots": 32,
+                "diff_method": "parameter-shift",
+            },
+            "strongly_entangling",
+        ),
+        (
+            "HardwareEfficientQuantumLayer",
+            {
+                "n_qubits": 4,
+                "n_layers": 2,
+                "name": "hardware_efficient",
+                "shots": 128,
+                "diff_method": "finite-diff",
+            },
+            "hardware_efficient",
+        ),
+    ],
+)
+def test_quantum_layer_config_returns_torch_module_wrapper(
+    class_name: str, kwargs: dict, name: str, isolated_executor
+):
+    future = isolated_executor.submit(
+        quantum_layer_config_returns_torch_module_wrapper,
+        class_name=class_name,
+        kwargs=kwargs,
+        name=name,
+    )
+    future.result()
+
+
+def quantum_layer_config_returns_torch_module_wrapper(
+    class_name: str,
+    kwargs: dict,
+    name: str,
+):
+    import os
+    os.environ["KERAS_BACKEND"] = "torch"
+    import keras
+    from neuralnet.models import quantum
+
+    config_cls = getattr(quantum, class_name)
+    config: quantum.QuantumLayer = config_cls(**kwargs)
+
+    assert config.diff_method == kwargs.get("diff_method", "backprop")
+    assert config.shots == kwargs.get("shots")
+    assert config.name == name
+
+    layer = config.get()
+
+    assert isinstance(layer, keras.layers.TorchModuleWrapper), (
+        "Expected instance of 'TorchModuleWrapper', got '{}'".format(
+            type(layer).__name__
+        )
+    )
+    assert str(layer.output_shape) == str(
+        kwargs.get("output_shape", (None, kwargs["n_qubits"]))
+    )
+    assert layer.name == kwargs["name"]
+
+    batch = 2
+    inp = np.random.RandomState(42).randn(batch, kwargs["n_qubits"]).astype(np.float32)
+    out = layer(inp)
+
+    # convert to numpy if this is a tensor-like object
+    try:
+        out_np = out.detach().cpu().numpy()
+    except Exception:
+        out_np = np.array(out)
+
+    expected_dim = kwargs.get("output_shape", (None, kwargs["n_qubits"]))[1]
+    assert out_np.shape == (batch, expected_dim)

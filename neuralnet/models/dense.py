@@ -1,0 +1,87 @@
+"""Factory models for building dense Keras components from validated configs.
+
+This module groups Pydantic-based factories used to create dense layers and
+Sequential MLP architectures.
+"""
+
+from typing import Annotated, Literal
+from pydantic import Field, ConfigDict, BaseModel
+
+
+class DenseFactory(BaseModel):
+    """Pydantic factory for a single Keras ``Dense`` layer."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    units: int = Field(
+        ...,
+        description="Number of neurons in the dense layer.",
+    )
+    activation: str = Field(
+        ...,
+        description="Activation function for the dense layer.",
+    )
+    kernel_initializer: str = Field(
+        "glorot_uniform",
+        description="Initializer for the kernel weights matrix.",
+    )
+    object_type: Literal["dense"] = Field(
+        "dense", description='Layer name. Must be "dense"'
+    )
+    bias_initializer: str = Field(
+        "zeros",
+        description="Initializer for the bias vector.",
+    )
+    name: Annotated[
+        str | None, Field(description="Name of the dense layer. If not provided, a default name will be generated.")
+    ] = None
+
+    def as_keras(self):
+        """Build a ``keras.layers.Dense`` instance from this factory.
+
+        Returns
+        -------
+        keras.layers.Dense
+            Dense layer configured with this factory's parameters.
+        """
+
+        from keras.layers import Dense
+
+        return Dense(
+            units=self.units,
+            activation=self.activation,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            name=self.name
+        )
+
+
+class MLPFactory(BaseModel):
+    """Pydantic factory for a Sequential multi-layer perceptron model."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    layers: list[DenseFactory] = Field(
+        ...,
+        description="List of dense layers in the MLP.",
+    )
+    name: str = Field("mlp", description="Model name")
+    object_type: Literal["mlp"] = Field(
+        "mlp", description='MLPFactory identifier. Must be "mlp".'
+    )
+
+    def as_keras(self):
+        """Build a ``keras.Sequential`` MLP model from this factory.
+
+        Returns
+        -------
+        keras.Sequential
+            Sequential model containing each configured dense layer in order.
+        """
+
+        from keras import Sequential
+
+        return Sequential(
+            [layer.as_keras() for layer in self.layers],
+            name=self.name,
+        )

@@ -2,21 +2,21 @@
 from itertools import product
 from pathlib import Path
 import re
-from typing import Annotated
+from typing import Annotated, TYPE_CHECKING
+if TYPE_CHECKING:
+    import torch
 import numpy as np
 import pandas as pd
 import polars as pl
 from pydantic import BaseModel, Field
-import torch
 import typer
 import yaml
 
-from neuralnet import get_logger
 from neuralnet.datasets import ParquetDataset
-from neuralnet.torch import training_torch
-from ..torch.inference import model_inference as generic_inference
+
+
 from ..submitit import ExecutorConfig
-from ..utils import pydantic_to_markdown_schema
+from ..pydantic import pydantic_to_markdown_schema
 
 
 def get_model(input_dim: int, grid_size: int, spline_order: int):
@@ -120,13 +120,15 @@ def get_data(
 
     return train_df, val_df
 
+type DeviceType = 'torch.device' | str
 
 def load_trained_model(
     model_path: Path,
     grid_size: int = 5,
     spline_order: int = 3,
-    device: torch.device | str = "cpu",
-) -> torch.nn.Module:
+    device: DeviceType = "cpu",
+) -> 'torch.nn.Module':
+    import torch
     if model_path.is_dir():
         model_path = model_path / "model_weights.pth"
 
@@ -241,7 +243,8 @@ def _load_val_data_with_metadata(
     rings_col: str,
     label_col: str,
     fold_col: str,
-) -> tuple[torch.Tensor, pd.DataFrame]:
+) -> tuple['torch.Tensor', 'pd.DataFrame']:
+    import torch
     ring_indexes = get_ring_indexes()
     ring_cols = [f"rings_{i}" for i in ring_indexes]
 
@@ -286,15 +289,16 @@ def model_inference(
     rings_col: str,
     label_col: str = "label",
     fold_col: str = "kfold",
-    device: torch.device | str = "cpu",
+    device: DeviceType = "cpu",
     clear_cuda_cache: bool = True,
     show_progress: bool = True,
 ) -> pd.DataFrame:
     dataset = ParquetDataset(dataset_dir=dataset_dir)
 
     def infer_model(
-        model_info: dict[str, object], infer_device: torch.device
+        model_info: dict[str, object], infer_device: 'torch.device'
     ) -> pd.DataFrame:
+        import torch
         model_dir = model_info["model_dir"]
         et_bin = model_info["et_bin"]
         eta_bin = model_info["eta_bin"]
@@ -355,7 +359,8 @@ def model_inference(
                 "eta_bin_right",
             ]
         ]
-
+    
+    from ..torch.inference import model_inference as generic_inference
     return generic_inference(
         model_path=model_path,
         select_models=select_models,
@@ -518,6 +523,8 @@ class VKANTrainingJob(BaseModel):
         fold: int,
         init: int,
     ):
+        from neuralnet import get_logger
+        from neuralnet.torch import training_torch
         logger = get_logger()
         logger.info(
             f"Loading data for et_bin ({et_bin_left}, {et_bin_right}), eta_bin ({eta_bin_left}, {eta_bin_right}), fold {fold} and init {init}"
@@ -565,6 +572,7 @@ class VKANTrainingJob(BaseModel):
         )
 
     def run(self):
+        from neuralnet import get_logger
         logger = get_logger()
         dataset = ParquetDataset(dataset_dir=str(self.dataset_dir))
         n_folds = get_n_folds(
