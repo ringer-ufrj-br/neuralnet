@@ -1,7 +1,8 @@
-from typing import TypedDict, TYPE_CHECKING
+from typing import TypedDict, TYPE_CHECKING, overload
 import numpy as np
 import numpy.typing as npt
 from numbers import Real
+import polars as pl
 
 if TYPE_CHECKING:
     import torch
@@ -17,6 +18,11 @@ def sp_index(tpr: Real, fpr: Real) -> Real:
 def torch_sp_index(tpr: "torch.Tensor", fpr: "torch.Tensor") -> "torch.Tensor":
     """Calculate the SP index for PyTorch tensors"""
     return torch.sqrt(torch.sqrt(tpr * (1 - fpr)) * (0.5 * (tpr + (1 - fpr))))
+
+
+def polars_sp_index(tpr: pl.Expr, fpr: pl.Expr) -> pl.Expr:
+    """Calculate the SP index for Polars expressions"""
+    return ((tpr * (1 - fpr)).sqrt() * (0.5 * (tpr + (1 - fpr)))).sqrt()
 
 
 class MaxSPDict(TypedDict):
@@ -47,7 +53,6 @@ class EnhancedConfusionMatrixDict(TypedDict):
     fpr: Numpy1DFloatArray
     sp: Numpy1DFloatArray
     auc: np.floating
-    max_sp: MaxSPDict
 
 
 def enhanced_confusion_matrix_from_preds(
@@ -103,18 +108,52 @@ def enhanced_confusion_matrix(
 
     enhanced_cm["auc"] = float(np.trapezoid(fpr[tpr_argsort], tpr[tpr_argsort]))
 
-    sp_argmax = np.argmax(sp)
-    max_sp_dict = {
-        "argmax": sp_argmax,
-        "threshold": thresholds[sp_argmax],
-        "tn": tn[sp_argmax],
-        "tp": tp[sp_argmax],
-        "fn": fn[sp_argmax],
-        "fp": fp[sp_argmax],
-        "acc": acc[sp_argmax],
-        "tpr": tpr[sp_argmax],
-        "fpr": fpr[sp_argmax],
-        "sp": sp[sp_argmax],
-    }
-    enhanced_cm["max_sp"] = max_sp_dict
     return enhanced_cm
+
+
+@overload
+def enhanced_confusion_matrix_from_polars(data: pl.DataFrame, label_col: str, score_col: str) -> pl.DataFrame: ...
+
+
+@overload
+def enhanced_confusion_matrix_from_polars(data: pl.LazyFrame, label_col: str, score_col: str) -> pl.LazyFrame: ...
+
+
+def enhanced_confusion_matrix_from_polars(data: pl.LazyFrame | pl.DataFrame, label_col: str, score_col: str):
+    """
+    Computes confusion matrix components (TN, FP, FN, TP).
+    """
+
+    # Cast target to integer to handle booleans or floats seamlessly
+    label_expr = pl.col(label_col).cast(pl.Int32)
+
+    cm_data = (
+        data.drop_nulls(subset=[label_col, score_col])
+        # 2. Group by threshold to aggregate tied neural network scores
+        .group_by(score_col)
+        .agg(label_expr.sum().alias("pos_count"), (pl.len() - label_expr.sum()).alias("neg_count"))
+        # 3. Sort thresholds descending (highest prediction confidence first)
+        .sort(score_col, descending=True)
+        # 4. Calculate True Positives and False Positives cumulatively
+        .select(
+            pl.col("pos_count").cum_sum().alias("tp"),
+            pl.col("neg_count").cum_sum().alias("fp"),
+            pl.col("pos_count").sum().alias("positives"),
+            pl.col("neg_count").sum().alias("negatives"),
+        )
+        .with_columns(
+            (pl.col("positives") - pl.col("tp")).alias("fn"),
+            (pl.col("negatives") - pl.col("fp")).alias("tn"),
+            (pl.col("positives") + pl.col("negatives")).alias("total"),
+        )
+        .with_columns(
+            (pl.col("tp") + pl.col("tn")).alias("correct"),
+            (pl.col("fn") + pl.col("fp")).alias("incorrect"),
+            (pl.col("tp")).truediv(pl.col("positives")).alias("tpr"),
+            (pl.col("fp")).truediv(pl.col("negatives")).alias("fpr"),
+            (pl.col("tp") + pl.col("tn")).truediv(pl.col("total")).alias("accuracy"),
+        )
+        .with_columns(polars_sp_index(pl.col("tpr"), pl.col("fpr")).alias("sp"))
+    )
+
+    return cm_data
