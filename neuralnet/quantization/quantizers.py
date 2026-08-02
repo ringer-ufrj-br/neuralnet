@@ -6,7 +6,7 @@ and convenience helpers for applying fixed-point quantization.
 
 from functools import cached_property
 from pydantic import BaseModel, Field
-from typing_extensions import Annotated
+from typing import Annotated
 import polars as pl
 
 
@@ -78,7 +78,9 @@ class FixedPointQuantizer(BaseModel):
             Expression that evaluates to fixed-point quantized values.
         """
         return (
-            (expr.clip(self.lower_bound, self.upper_bound) * self.floating_power)
+            expr
+            .mul(self.floating_power)
             .round()
             .truediv(self.floating_power)
+            .clip(self.lower_bound, self.upper_bound)
         )

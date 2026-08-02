@@ -40,3 +40,36 @@ def hgqdense_from_keras_dense_copies_configuration_and_weights():
     quantized_weights = quantized_layer.get_weights()
     np.testing.assert_allclose(quantized_weights[0], expected_weights[0])
     np.testing.assert_allclose(quantized_weights[1], expected_weights[1])
+
+
+def test_fixed_point_quantization_dense_layer_as_keras(isolated_executor):
+    future = isolated_executor.submit(_fixed_point_quantization_dense_layer_as_keras_routine)
+    future.result()
+
+
+def _fixed_point_quantization_dense_layer_as_keras_routine():
+    os.environ["KERAS_BACKEND"] = "tensorflow"
+
+    from neuralnet.models.dense import FixedPointQuantizationDenseLayer
+    from neuralnet.quantization.keras import FixedPointQuantizationDense
+
+    factory = FixedPointQuantizationDenseLayer(
+        units=4,
+        activation="relu",
+        kernel_initializer="ones",
+        bias_initializer="ones",
+        floating_bits=8,
+        integer_bits=4,
+        name="test_fp_dense",
+    )
+    layer = factory.as_keras()
+
+    assert isinstance(layer, FixedPointQuantizationDense)
+    assert layer.units == 4
+    assert layer.activation == "relu"
+    assert layer.name == "test_fp_dense"
+
+    layer.build((None, 2))
+    np.testing.assert_allclose(layer.get_weights()[0], np.ones((2, 4), dtype=np.float32))
+    np.testing.assert_allclose(layer.get_weights()[1], np.ones((4,), dtype=np.float32))
+

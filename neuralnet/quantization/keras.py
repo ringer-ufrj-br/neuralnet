@@ -4,8 +4,7 @@ This module contains the project's bespoke Keras-based quantization layers and
 helpers for converting Sequential models into fixed-point quantized versions.
 """
 
-from abc import ABC
-from keras import activations, ops, initializers, Sequential
+from keras import activations, ops, initializers, Sequential, saving
 from keras.layers import Layer, Dense, Activation
 
 
@@ -40,11 +39,12 @@ def fixed_point_quantizer(x, integer_bits: int, floating_bits: int):
     def grad(*args, upstream=None):
         if upstream is None:
             upstream = args[0]  # PyTorch sometimes puts args in a tuple
-        return upstream
+        return upstream, None, None
 
     return clipped_quantized_x, grad
 
 
+@saving.register_keras_serializable(package="neuralnet")
 class FixedPointQuantizationDense(Layer):
     """Dense layer that applies custom fixed-point quantization.
 
@@ -54,6 +54,10 @@ class FixedPointQuantizationDense(Layer):
         Number of output units produced by the dense layer.
     activation : str or callable or None
         Activation identifier used to configure the post-affine activation.
+    kernel_initializer : str or initializers.Initializer
+        Initializer for the kernel weight matrix.
+    bias_initializer : str or initializers.Initializer
+        Initializer for the bias vector.
     kernel : keras.Variable
         Trainable weight matrix for the dense transform.
     bias : keras.Variable
@@ -68,6 +72,8 @@ class FixedPointQuantizationDense(Layer):
         integer_bits: int,
         units: int,
         activation: str | None = None,
+        kernel_initializer: str | initializers.Initializer = "glorot_uniform",
+        bias_initializer: str | initializers.Initializer = "zeros",
         **kwargs,
     ):
         """Initialize a quantized dense layer.
@@ -83,10 +89,16 @@ class FixedPointQuantizationDense(Layer):
         activation : str or callable, optional
             Activation to apply after the quantized dense computation. If not
             provided, the layer is linear.
+        kernel_initializer : str or initializers.Initializer, optional
+            Initializer for the kernel weight matrix. Defaults to ``"glorot_uniform"``.
+        bias_initializer : str or initializers.Initializer, optional
+            Initializer for the bias vector. Defaults to ``"zeros"``.
         **kwargs
             Additional keyword arguments forwarded to the base layer.
         """
         super().__init__(**kwargs)
+        self._floating_bits_val = int(floating_bits)
+        self._integer_bits_val = int(integer_bits)
         # Casting so keras can make the bits operation with float32 tensors
         self.floating_bits = self.add_weight(
             name="floating_bits",
@@ -102,6 +114,8 @@ class FixedPointQuantizationDense(Layer):
         )
         self.units = units
         self.activation = activation
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.bias_initializer = initializers.get(bias_initializer)
 
     def build(self, input_shape):
         """Create the trainable kernel and bias weights.
@@ -114,12 +128,12 @@ class FixedPointQuantizationDense(Layer):
         # Create trainable weights for the layer
         self.kernel = self.add_weight(
             shape=(input_shape[-1], self.units),
-            initializer="uniform",
+            initializer=self.kernel_initializer,
             trainable=True,
         )
         self.bias = self.add_weight(
             shape=(self.units,),
-            initializer="zeros",
+            initializer=self.bias_initializer,
             trainable=True,
         )
         if self.activation is not None:
@@ -142,23 +156,36 @@ class FixedPointQuantizationDense(Layer):
             addition, and optional activation.
         """
         # Apply quantization to the kernel weights
-        quantized_kernel = fixed_point_quantizer(
-            self.kernel, self.integer_bits, self.floating_bits
-        )
-        quantized_bias = fixed_point_quantizer(
-            self.bias, self.integer_bits, self.floating_bits
-        )
+        quantized_kernel = fixed_point_quantizer(self.kernel, self.integer_bits, self.floating_bits)
+        quantized_bias = fixed_point_quantizer(self.bias, self.integer_bits, self.floating_bits)
         matmul = ops.matmul(inputs, quantized_kernel)
-        quantized_matmul = fixed_point_quantizer(
-            matmul, self.integer_bits, self.floating_bits
-        )
+        quantized_matmul = fixed_point_quantizer(matmul, self.integer_bits, self.floating_bits)
         added_bias = ops.add(quantized_matmul, quantized_bias)
-        added_bias = fixed_point_quantizer(
-            added_bias, self.integer_bits, self.floating_bits
-        )
+        added_bias = fixed_point_quantizer(added_bias, self.integer_bits, self.floating_bits)
         if self.activation_fn is not None:
-            output = self.activation_fn(added_bias)
-        return output
+            return self.activation_fn(added_bias)
+        return added_bias
+
+    def get_config(self):
+        """Return layer configuration dictionary for serialization.
+
+        Returns
+        -------
+        dict
+            Layer configuration dictionary containing bit parameters and layer dimensions.
+        """
+        config = super().get_config()
+        config.update(
+            {
+                "floating_bits": self._floating_bits_val,
+                "integer_bits": self._integer_bits_val,
+                "units": self.units,
+                "activation": self.activation,
+                "kernel_initializer": initializers.serialize(self.kernel_initializer),
+                "bias_initializer": initializers.serialize(self.bias_initializer),
+            }
+        )
+        return config
 
 
 type SuportedFixedPointQuantizationTypes = Dense | Activation
@@ -199,27 +226,28 @@ def fixed_point_quantize_layer(
             integer_bits=integer_bits,
             units=layer.units,
             activation=layer.activation,
+            kernel_initializer=layer.kernel_initializer,
+            bias_initializer=layer.bias_initializer,
             name=f"quantized_{layer.name}",
         )
         quantized_layer.build((None, int(layer.kernel.shape[0])))
         fp_weights = layer.get_weights()
         quantized_weights = quantized_layer.get_weights()
-        quantized_weights[0] = fp_weights[0]  # Copy the kernel weights
+        quantized_weights[0] = fp_weights[0]  # Copy kernel weights
+        if len(fp_weights) > 1 and len(quantized_weights) > 1:
+            quantized_weights[1] = fp_weights[1]  # Copy bias weights
         quantized_layer.set_weights(quantized_weights)
     elif isinstance(layer, Activation):
         # For activation layers, we don't quantize them directly
-        return quantized_layer
+        return layer
     else:
-        raise NotImplementedError(
-            f"Unsupported layer type for fixed-point quantization: {type(layer)}"
-        )
+        raise NotImplementedError(f"Unsupported layer type for fixed-point quantization: {type(layer)}")
 
     return quantized_layer
 
 
 def fixed_point_quantize(
-    model: "Sequential", floating_bits: int, integer_bits: int,
-    name: str | None = None
+    model: "Sequential", floating_bits: int, integer_bits: int, name: str | None = None
 ) -> "Sequential":
     """Quantize all supported layers in a Keras Sequential model.
 
@@ -246,9 +274,7 @@ def fixed_point_quantize(
         Input(shape=model.input_shape[1:]),
     ]
     for layer in model.layers:
-        quantized_layer = fixed_point_quantize_layer(
-            layer, floating_bits=floating_bits, integer_bits=integer_bits
-        )
+        quantized_layer = fixed_point_quantize_layer(layer, floating_bits=floating_bits, integer_bits=integer_bits)
         quantized_layers.append(quantized_layer)
     if name is None:
         name = f"{model.name}_quantized"

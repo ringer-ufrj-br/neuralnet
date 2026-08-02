@@ -51,6 +51,7 @@ def training_job_test_routine(
         "rings_col": "rings",
         "ring_fraction": 2,
         "model_factory": {
+            "object_type": "mlp",
             "layers": [
                 {
                     "units": 4,
@@ -117,10 +118,10 @@ def training_job_test_routine(
     ) * len(job.eta_bins)
     assert loaded_job.selected_models.height == len(job.et_bins) * len(job.eta_bins)
 
-    inference_pipeline = loaded_job.get_inference_pipeline()
+    specialist_committee = loaded_job.get_specialist_committee()
     inference_input = ringer_parquet_dataset.predict_df()
-    inference_results = inference_pipeline(
-        inference_input, passthrough=True, all_layers=True
+    inference_results = specialist_committee.predict(
+        inference_input, passthrough=True
     ).collect()
 
     assert isinstance(inference_results, pl.DataFrame), (
@@ -138,12 +139,6 @@ def training_job_test_routine(
         "output": pa.Column(pl.Float32, nullable=False),
         # "prediction": pa.Column(pl.Boolean, nullable=False),
     }
-    for layer_config in job_config["model_factory"]["layers"]:
-        for i in range(layer_config["units"]):
-            inference_results_expected_schema[f"layer.{layer_config['name']}.{i}"] = pa.Column(
-                pl.Float32, nullable=False
-            )
-
     inference_results_expected_schema = pa.DataFrameSchema(
         inference_results_expected_schema
     )

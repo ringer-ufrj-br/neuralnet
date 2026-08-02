@@ -5,6 +5,12 @@ from functools import cached_property
 from ..quantization.quantizers import FixedPointQuantizer
 
 
+type SuffixField = Annotated[
+    str,
+    Field(description="Suffix for the output column containing normalized values."),
+]
+
+
 class AlternativeNorm1(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -15,12 +21,7 @@ class AlternativeNorm1(BaseModel):
             min_length=1,
         ),
     ]
-    suffix: Annotated[
-        str,
-        Field(
-            description="Suffix for the output column containing normalized values."
-        ),
-    ] = "alternative_norm1"
+    suffix: SuffixField = "alternative_norm1"
 
     @cached_property
     def output_cols(self) -> list[str]:
@@ -48,58 +49,40 @@ class AlternativeNorm1(BaseModel):
 
         for col_name in self.input_cols:
             if col_name not in schema:
-                raise ValueError(
-                    f"Input column '{col_name}' not found in DataFrame schema."
-                )
+                raise ValueError(f"Input column '{col_name}' not found in DataFrame schema.")
             col_dtype = schema[col_name]
             if not col_dtype.is_float():
-                raise TypeError(
-                    f"Expected floating type for '{col_name}', got {col_dtype}"
-                )
+                raise TypeError(f"Expected floating type for '{col_name}', got {col_dtype}")
 
         return self.get_polars_expr()
-    
-    def fixed_point_quantization(
-        self, quantizer: FixedPointQuantizer
-    ) -> "FixedPointQuantizedAlternativeNorm1":
-        return FixedPointQuantizedAlternativeNorm1(
-            input_cols=self.input_cols, suffix=self.suffix, quantizer=quantizer
-        )
+
+    def fixed_point_quantization(self, quantizer: FixedPointQuantizer) -> "FixedPointQuantizedAlternativeNorm1":
+        return FixedPointQuantizedAlternativeNorm1(input_cols=self.input_cols, suffix=self.suffix, quantizer=quantizer)
 
     @overload
-    def __call__(
-        self, data: pl.DataFrame, passthrough: bool = False
-    ) -> pl.DataFrame: ...
+    def __call__(self, data: pl.DataFrame, passthrough: bool = False) -> pl.DataFrame: ...
 
     @overload
-    def __call__(
-        self, data: pl.LazyFrame, passthrough: bool = False
-    ) -> pl.LazyFrame: ...
+    def __call__(self, data: pl.LazyFrame, passthrough: bool = False) -> pl.LazyFrame: ...
 
-    def __call__(
-        self, data: pl.DataFrame | pl.LazyFrame, passthrough: bool = False
-    ) -> pl.DataFrame | pl.LazyFrame:
+    def __call__(self, data: pl.DataFrame | pl.LazyFrame, passthrough: bool = False) -> pl.DataFrame | pl.LazyFrame:
         expr = self.get_expr(data)
         if passthrough:
             return data.with_columns(*expr)
         return data.select(*expr)
 
-    def fixed_point_quantize(
-        self, quantizer: FixedPointQuantizer
-    ) -> "FixedPointQuantizedAlternativeNorm1":
+    def fixed_point_quantize(self, quantizer: FixedPointQuantizer) -> "FixedPointQuantizedAlternativeNorm1":
         return FixedPointQuantizedAlternativeNorm1(
             input_cols=self.input_cols, output_col=self.output_col, quantizer=quantizer
         )
 
 
 class FixedPointQuantizedAlternativeNorm1(AlternativeNorm1):
-    quantizer: FixedPointQuantizer = Field(
-        description="Fixed-point quantizer configuration."
-    )
+    quantizer: FixedPointQuantizer = Field(description="Fixed-point quantizer configuration.")
+
+    suffix: SuffixField = "fixed_point_alternative_norm1"
 
     def get_polars_expr(self) -> list[pl.Expr]:
         orig_exprs = super().get_polars_expr()
-        new_exprs = [
-            expr.pipe(self.quantizer.quantize_polars_expr) for expr in orig_exprs
-        ]
+        new_exprs = [expr.pipe(self.quantizer.quantize_polars_expr) for expr in orig_exprs]
         return new_exprs

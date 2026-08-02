@@ -7,6 +7,7 @@ from typing import (
     Self,
     TypedDict,
     TYPE_CHECKING,
+    overload,
 )
 
 from neuralnet import get_logger
@@ -16,13 +17,7 @@ if TYPE_CHECKING:
     from keras import Sequential
 
 from itertools import product
-from pydantic import (
-    AfterValidator,
-    Field,
-    ConfigDict,
-    BaseModel,
-    validate_call,
-)
+from pydantic import AfterValidator, Field, ConfigDict, BaseModel
 import logging
 from pathlib import Path
 import numpy as np
@@ -46,9 +41,14 @@ from ...models.keras.factories import (
     LossType,
     OptimizerType,
 )
-from ...models.binned_committee import BinnedCommittee, BinnedModel, VariableBin
-from ...models.dense import MLPFactory
+from ...models.binned_committee import VariableBin
+from .models import BinnedSpecialistCommittee, BinnedSpecialistModel
+from ...models.dense import (
+    MLPFactory,
+    FixedPointQuantizedMLP,
+)
 from ...utils import traverse
+from ...normalizers.factories import FixedPointAlternativeNormL1
 from ...normalizers.polars import AlternativeNorm1, FixedPointQuantizedAlternativeNorm1
 from ...utils.polars import RingSlicesPerLayer
 from ...datasets import DirectoryType
@@ -56,10 +56,10 @@ from ...pydantic import YamlBaseModel
 from ...bins import (
     Bin,
     BinDict,
+    AbsoluteVariableBin,
     AbsoluteBin,
     AbsoluteBinDict,
 )
-from ...quantization.hgq import HGQFixedPointConfig
 from ...quantization.quantizers import FixedPointQuantizer
 
 type BalanceClassWeightsType = Annotated[
@@ -93,13 +93,9 @@ type EtaBinType = Annotated[
     ),
 ]
 
-type EtColType = Annotated[
-    str, Field(description="Name of the et column in the data table")
-]
+type EtColType = Annotated[str, Field(description="Name of the et column in the data table")]
 
-type EtaColType = Annotated[
-    str, Field(description="Name of the eta column in the data table")
-]
+type EtaColType = Annotated[str, Field(description="Name of the eta column in the data table")]
 
 type FromLogitsType = Annotated[
     bool,
@@ -109,7 +105,7 @@ type FromLogitsType = Annotated[
 ]
 
 type NormStrategyType = Annotated[
-    Literal["l1"] | None,
+    Literal["l1"] | FixedPointAlternativeNormL1 | None,
     Field(
         description="Normalization strategy to apply to the rings. If None, no normalization is applied. If 'l1', each ring is divided by the sum of all rings for that sample.",
     ),
@@ -189,13 +185,11 @@ type PatienceType = Annotated[
 
 
 def validate_selection_criteria_key(value: str) -> str:
-    valid_keys_list = [
-        f"fit.train.{metric}" for metric in FitTrainMetrics.__annotations__.keys()
-    ] + [f"fit.val.{metric}" for metric in FitValMetrics.__annotations__.keys()]
+    valid_keys_list = [f"fit.train.{metric}" for metric in FitTrainMetrics.__annotations__] + [
+        f"fit.val.{metric}" for metric in FitValMetrics.__annotations__
+    ]
     if value not in valid_keys_list:
-        raise ValueError(
-            f"Invalid selection criteria key: {value}. Must be one of {valid_keys_list}"
-        )
+        raise ValueError(f"Invalid selection criteria key: {value}. Must be one of {valid_keys_list}")
     return value
 
 
@@ -221,9 +215,7 @@ class SelectionCriteria(BaseModel):
         elif self.criterion == "min":
             return pl.all().sort_by(self.key, descending=False).first()
         else:
-            raise ValueError(
-                f"Invalid criterion: {self.criterion}. Must be either 'max' or 'min'."
-            )
+            raise ValueError(f"Invalid criterion: {self.criterion}. Must be either 'max' or 'min'.")
 
 
 type EtaBinIntervalValue = Annotated[
@@ -243,14 +235,9 @@ class BinValidator:
         length = len(et_bins)
         is_float = isinstance(et_bins[0], float)
         if length < 2 and is_float:
-            raise ValueError(
-                f"et_bins must have at least 2 values to define a bin. Got {length} value(s)."
-            )
+            raise ValueError(f"et_bins must have at least 2 values to define a bin. Got {length} value(s).")
         if is_float:
-            et_bins = [
-                self.bin_class(low=et_bins[i], high=et_bins[i + 1], closed="left")
-                for i in range(length - 1)
-            ]
+            et_bins = [self.bin_class(low=et_bins[i], high=et_bins[i + 1], closed="left") for i in range(length - 1)]
             return et_bins
         return et_bins
 
@@ -262,10 +249,18 @@ class PreprocessingPipeline:
     def __init__(
         self,
         ring_selector: RingSlicesPerLayer,
-        normalizer: AlternativeNorm1
-        | FixedPointQuantizedAlternativeNorm1
-        | None = None,
+        normalizer: AlternativeNorm1 | FixedPointQuantizedAlternativeNorm1 | None = None,
     ):
+        """Create a preprocessing pipeline for ring features.
+
+        Parameters
+        ----------
+        ring_selector : RingSlicesPerLayer
+            Ring selection and expansion transform.
+        normalizer : AlternativeNorm1 or FixedPointQuantizedAlternativeNorm1 or None, default=None
+            Optional normalization stage applied after ring selection.
+        """
+
         self.ring_selector = ring_selector
         self.normalizer = normalizer
 
@@ -275,20 +270,46 @@ class PreprocessingPipeline:
         rings_col: RingsColType,
         ring_fraction: RingFractionType = 2,
         norm_strategy: NormStrategyType = None,
-    ):
+    ) -> "PreprocessingPipeline":
+        """Build a preprocessing pipeline from training job parameters.
+
+        Parameters
+        ----------
+        rings_col : RingsColType
+            Input rings column name.
+        ring_fraction : RingFractionType, default=2
+            Fraction of rings retained per layer.
+        norm_strategy : {"l1"} or None, default=None
+            Optional normalization strategy.
+
+        Returns
+        -------
+        PreprocessingPipeline
+            Configured preprocessing pipeline.
+
+        Raises
+        ------
+        ValueError
+            If ``norm_strategy`` is not supported.
+        """
+
         ring_selector = RingSlicesPerLayer(
             rings_col=rings_col,
             fraction=ring_fraction,
             output_format="expanded_columns",
         )
+
         if norm_strategy == "l1":
             normalizer = AlternativeNorm1(
                 input_cols=ring_selector.output_cols,
             )
+        elif isinstance(norm_strategy, FixedPointAlternativeNormL1):
+            normalizer = norm_strategy.as_polars_transform(input_cols=ring_selector.output_cols)
         elif norm_strategy is None:
-            return None
+            normalizer = None
         else:
             raise ValueError(f"Unsupported norm_strategy: {norm_strategy}")
+
         return cls(
             ring_selector=ring_selector,
             normalizer=normalizer,
@@ -296,10 +317,26 @@ class PreprocessingPipeline:
 
     @property
     def input_cols(self) -> list[str]:
+        """Columns required by the preprocessing pipeline.
+
+        Returns
+        -------
+        list[str]
+            Input column names required by ring selection.
+        """
+
         return self.ring_selector.input_cols
 
     @property
     def output_cols(self) -> list[str]:
+        """Columns produced by the preprocessing pipeline.
+
+        Returns
+        -------
+        list[str]
+            Output feature columns consumed by downstream models.
+        """
+
         if self.normalizer is None:
             return self.ring_selector.output_cols
 
@@ -307,32 +344,63 @@ class PreprocessingPipeline:
 
     @cached_property
     def aux_cols(self) -> list[str]:
+        """Auxiliary columns produced by intermediate preprocessing stages.
+
+        Returns
+        -------
+        list[str]
+            Intermediate ring-selector columns retained when normalization is
+            active; empty when no normalizer is configured.
+        """
+
         if self.normalizer is None:
             return []
         return self.ring_selector.output_cols
 
-    def __call__(
-        self, data: pl.DataFrame | pl.LazyFrame, passthrough: bool = False
-    ) -> pl.DataFrame | pl.LazyFrame:
+    def __call__(self, data: pl.DataFrame | pl.LazyFrame, passthrough: bool = False) -> pl.DataFrame | pl.LazyFrame:
+        """Apply preprocessing pipeline transformations.
+
+        Parameters
+        ----------
+        data : pl.DataFrame or pl.LazyFrame
+            Input table to preprocess.
+        passthrough : bool, default=False
+            Whether to preserve non-feature columns in intermediate transforms.
+
+        Returns
+        -------
+        pl.DataFrame or pl.LazyFrame
+            Preprocessed table.
+        """
+
         data = data.pipe(self.ring_selector, passthrough=passthrough)
         if self.normalizer:
             data = data.pipe(self.normalizer, passthrough=passthrough)
         return data
 
     def fixed_point_quantization(self, norm_quantizer: FixedPointQuantizer) -> Self:
+        """Create a fixed-point quantized variant of the pipeline.
+
+        Parameters
+        ----------
+        norm_quantizer : FixedPointQuantizer
+            Quantizer applied to the normalization stage when available.
+
+        Returns
+        -------
+        Self
+            Quantized preprocessing pipeline.
+        """
+
         if self.normalizer is None:
             return self
 
         if self.normalizer is None:
             logger = get_logger()
-            logger.warning(
-                "Normalization strategy is None. Fixed Point quantization will not change the behavior."
-            )
+            logger.warning("Normalization strategy is None. Fixed Point quantization will not change the behavior.")
             quantized_normalizer = None
         else:
-            quantized_normalizer = self.normalizer.fixed_point_quantization(
-                norm_quantizer
-            )
+            quantized_normalizer = self.normalizer.fixed_point_quantization(norm_quantizer)
 
         return PreprocessingPipeline(self.ring_selector, quantized_normalizer)
 
@@ -341,125 +409,6 @@ class BinDict(TypedDict):
     low: float
     high: float
     closed: Literal["left", "right", "both", "neither"]
-
-
-class InferencePipeline:
-    def __init__(
-        self,
-        preprocessing_pipeline: PreprocessingPipeline,
-        committee: BinnedCommittee,
-        eta_col: EtaColType,
-        et_col: EtColType,
-    ):
-        self.preprocessing_pipeline = preprocessing_pipeline
-        self.committee = committee
-        self.eta_col = eta_col
-        self.et_col = et_col
-
-    @staticmethod
-    def get_abs_eta_col_name(eta_col: EtaColType) -> str:
-        return f"{eta_col}_abs"
-
-    @cached_property
-    def input_cols(self) -> list[str]:
-        return self.preprocessing_pipeline.input_cols + [self.eta_col, self.et_col]
-
-    @cached_property
-    def output_cols(self) -> list[str]:
-        return self.committee.output_cols
-
-    def __call__(
-        self,
-        data: pl.DataFrame | pl.LazyFrame,
-        batch_size: int = 32,
-        all_layers: bool = False,
-        passthrough: bool = False,
-    ) -> pl.DataFrame | pl.LazyFrame:
-        return (
-            data.pipe(self.preprocessing_pipeline, passthrough=True)
-            .with_columns(
-                pl.col(self.eta_col)
-                .abs()
-                .alias(self.get_abs_eta_col_name(self.eta_col))
-            )
-            .pipe(
-                self.committee.predict_polars,
-                all_layers=all_layers,
-                passthrough=passthrough,
-                batch_size=batch_size,
-            )
-        )
-
-    @classmethod
-    def from_job_params(
-        cls,
-        rings_col: RingsColType,
-        ring_fraction: RingFractionType,
-        norm_strategy: NormStrategyType,
-        eta_col: EtaColType,
-        et_col: EtColType,
-        keras_models: list["Sequential"],
-        et_bins: list[BinDict],
-        eta_bins: list[BinDict],
-        decision_thresholds: list[float] | None = None,
-    ) -> Self:
-        preprocessing_pipeline = PreprocessingPipeline.from_job_params(
-            rings_col=rings_col,
-            ring_fraction=ring_fraction,
-            norm_strategy=norm_strategy,
-        )
-
-        if decision_thresholds is None:
-            decision_thresholds = (None for _ in range(len(keras_models)))
-
-        abs_eta_col_name = cls.get_abs_eta_col_name(eta_col)
-        binned_models = []
-        iterator = zip(et_bins, eta_bins, keras_models, decision_thresholds)
-        for et_bin, eta_bin, keras_model, decision_threshold in iterator:
-            binned_model = BinnedModel(
-                bins=[
-                    VariableBin(var_name=et_col, **et_bin),
-                    VariableBin(var_name=abs_eta_col_name, **eta_bin),
-                ],
-                keras_model=keras_model,
-                features=preprocessing_pipeline.output_cols,
-                decision_threshold=decision_threshold,
-            )
-            binned_models.append(binned_model)
-
-        committee = BinnedCommittee(
-            models=binned_models,
-        )
-        return cls(
-            preprocessing_pipeline=preprocessing_pipeline,
-            committee=committee,
-            eta_col=eta_col,
-            et_col=et_col,
-        )
-
-    @validate_call
-    def fixed_point_quantization(
-        self,
-        norm_quantizer: FixedPointQuantizer,
-        weight_quantizer: HGQFixedPointConfig,
-        bias_quantizer: HGQFixedPointConfig ,
-        backend: str = 'hgq'
-    ) -> Self:
-
-        quantized_committee = self.committee.fixed_point_quantization(
-            weight_config=weight_quantizer,
-            bias_config=bias_quantizer,
-            backend=backend
-        )
-        preprocessing_pipeline = self.preprocessing_pipeline.fixed_point_quantization(
-            norm_quantizer=norm_quantizer
-        )
-        return InferencePipeline(
-            preprocessing_pipeline=preprocessing_pipeline,
-            committee=quantized_committee,
-            eta_col=self.eta_col,
-            et_col=self.et_col,
-        )
 
 
 class RingerKerasTrainingJob(YamlBaseModel):
@@ -481,10 +430,14 @@ class RingerKerasTrainingJob(YamlBaseModel):
     ring_fraction: RingFractionType = 2
 
     # Model params
-    model_factory: MLPFactory = Field(
-        ...,
-        description="Description of the MLP model to train.",
-    )
+    model_factory: Annotated[
+        MLPFactory | FixedPointQuantizedMLP,
+        Field(
+            ...,
+            discriminator="object_type",
+            description="Description of the MLP model to train.",
+        ),
+    ]
     from_logits: FromLogitsType = False
     epochs: EpochsType = 5000
     verbose: VerboseType = 1
@@ -511,18 +464,12 @@ class RingerKerasTrainingJob(YamlBaseModel):
     # )
 
     # Execution related fields
-    dry_run: Annotated[
-        bool, Field(description="Perform a dry run without actually training")
-    ] = False
+    dry_run: Annotated[bool, Field(description="Perform a dry run without actually training")] = False
     executor_config: Annotated[
         ExecutorConfig,
-        Field(
-            description="Slurm configuration for running the training job on a Slurm cluster"
-        ),
+        Field(description="Slurm configuration for running the training job on a Slurm cluster"),
     ]
-    output_path: Annotated[
-        Path, Field(description="Path to save the results of the job")
-    ]
+    output_path: Annotated[Path, Field(description="Path to save the results of the job")]
 
     # Misc
     logger_name: LoggerName = None
@@ -574,20 +521,16 @@ class RingerKerasTrainingJob(YamlBaseModel):
     def all_model_results(self) -> pl.DataFrame:
         results_path = self.output_path / "all_models_results.parquet"
         if not results_path.exists():
-            raise FileNotFoundError(
-                f"All models results file not found at {results_path}"
-            )
+            raise FileNotFoundError(f"All models results file not found at {results_path}")
         return pl.read_parquet(results_path)
 
     @cached_property
     def selected_models(self) -> pl.DataFrame:
         selected_models_path = self.output_path / "selected_models.parquet"
         if not selected_models_path.exists():
-            raise FileNotFoundError(
-                f"Selected models file not found at {selected_models_path}"
-            )
+            raise FileNotFoundError(f"Selected models file not found at {selected_models_path}")
         return pl.read_parquet(selected_models_path)
-    
+
     @cached_property
     def models_output_dir(self) -> Path:
         return self.output_path / "models"
@@ -605,43 +548,62 @@ class RingerKerasTrainingJob(YamlBaseModel):
             member = self.get_member_output_dir(member)
         return member / "results.json.zip"
 
-    # def model_post_init(self, context):
-    #     res = super().model_post_init(context)
-    #     if self.lower_threshold >= self.upper_threshold:
-    #         raise ValueError(
-    #             f"lower_threshold must be less than upper_threshold. Got lower_threshold={self.lower_threshold} and upper_threshold={self.upper_threshold}."
-    #         )
-    #     self._thresholds = np.linspace(
-    #         self.lower_threshold,
-    #         self.upper_threshold,
-    #         self.num_thresholds,
-    #     )
-
-    #     self._thresholds = (
-    #         self._thresholds.tolist()
-    #     )  # Convert to list for JSON serialization
-
-    #     return res
-
     def get_dataset(
-        self, fold: int, et_bin: BinDict, eta_bin: BinDict, **kwargs
+        self, fold: int, et_bin: BinDict | None = None, eta_bin: BinDict | None = None, **kwargs
     ) -> RingerParquetDataset:
-        config_dict = dict(
-            dataset_dir=self.dataset_dir,
-            data_table=self.data_table,
-            rings_col=self.rings_col,
-            kfold_table=self.kfold_table,
-            label_col=self.label_col,
-            fold_col=self.fold_col,
-            fold=fold,
-            et_bin={"var_name": self.et_col, **et_bin},
-            eta_bin={"var_name": self.eta_col, **eta_bin},
-        )
+        """Instantiate a dataset view for a specific fold and bin pair.
+
+        Parameters
+        ----------
+        fold : int
+            Fold index.
+        et_bin : BinDict | None, default=None
+            Et bin definition.
+        eta_bin : BinDict | None, default=None
+            Eta bin definition.
+        **kwargs
+            Additional keyword arguments forwarded to ``RingerParquetDataset``.
+
+        Returns
+        -------
+        RingerParquetDataset
+            Configured dataset instance.
+        """
+        if et_bin is not None:
+            et_bin = {"var_name": self.et_col, **et_bin}
+
+        if eta_bin is not None:
+            eta_bin = {"var_name": self.eta_col, **eta_bin}
+
+        config_dict = {
+            "dataset_dir": self.dataset_dir,
+            "data_table": self.data_table,
+            "rings_col": self.rings_col,
+            "kfold_table": self.kfold_table,
+            "label_col": self.label_col,
+            "fold_col": self.fold_col,
+            "fold": fold,
+            "et_bin": et_bin,
+            "eta_bin": eta_bin,
+        }
         config_dict.update(kwargs)
         dataset = RingerParquetDataset(**config_dict)
         return dataset
 
     def get_numpy_data(self, df: pl.LazyFrame) -> tuple[np.ndarray, np.ndarray]:
+        """Materialize model-ready NumPy arrays from a lazy dataset frame.
+
+        Parameters
+        ----------
+        df : pl.LazyFrame
+            Input dataset split.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            Tuple ``(X, y)`` with preprocessed feature matrix and labels.
+        """
+
         df = df.pipe(self.preprocessing_pipeline, passthrough=True)
         X = df.select(self.preprocessing_pipeline.output_cols)
         y = df.select(self.label_col)
@@ -650,12 +612,36 @@ class RingerKerasTrainingJob(YamlBaseModel):
         y = y.to_numpy().flatten()
         return X, y
 
-    def get_inference_pipeline(
+    def get_specialist_model(
         self,
+        member_id: int,
         et_col: str | None = None,
         eta_col: str | None = None,
         rings_col: str | None = None,
-    ) -> InferencePipeline:
+    ) -> BinnedSpecialistModel:
+        """Build one specialist model from a selected trained member.
+
+        Parameters
+        ----------
+        member_id : int
+            Identifier of the selected member.
+        et_col : str or None, default=None
+            Et column name. Uses job default when ``None``.
+        eta_col : str or None, default=None
+            Eta column name. Uses job default when ``None``.
+        rings_col : str or None, default=None
+            Rings column name. Uses job default when ``None``.
+
+        Returns
+        -------
+        BinnedSpecialistModel
+            Specialist model bound to the selected member bins and metadata.
+
+        Raises
+        ------
+        ValueError
+            If no or multiple model rows match ``member_id``.
+        """
 
         if et_col is None:
             et_col = self.et_col
@@ -666,48 +652,91 @@ class RingerKerasTrainingJob(YamlBaseModel):
         if rings_col is None:
             rings_col = self.rings_col
 
-        keras_models = []
-        et_bins = []
-        eta_bins = []
-
-        for row in self.selected_models.iter_rows(named=True):
-            member_id = row["id"]
-            keras_model: "Sequential" = self.get_member_model(member_id)
-            keras_models.append(keras_model)
-            et_bins.append(
-                {
-                    "low": row["et_bin.low"],
-                    "high": row["et_bin.high"],
-                    "closed": row["et_bin.closed"],
-                }
-            )
-            eta_bins.append(
-                {
-                    "low": row["eta_bin.low"],
-                    "high": row["eta_bin.high"],
-                    "closed": row["eta_bin.closed"],
-                }
-            )
-
-        inference_pipeline = InferencePipeline.from_job_params(
+        preprocessing_pipeline = PreprocessingPipeline.from_job_params(
             rings_col=rings_col,
             ring_fraction=self.ring_fraction,
             norm_strategy=self.norm_strategy,
-            eta_col=eta_col,
-            et_col=et_col,
-            keras_models=keras_models,
-            et_bins=et_bins,
-            eta_bins=eta_bins,
         )
 
-        return inference_pipeline
+        member_rows = self.all_model_results.filter(pl.col("id") == member_id)
+        if member_rows.height == 0:
+            raise ValueError(f"No selected model entry found for member_id={member_id}.")
+        if member_rows.height > 1:
+            raise ValueError(f"Multiple model entries found for member_id={member_id}.")
+        row = member_rows.row(0, named=True)
+
+        keras_model, training_results = self.get_member_model(member_id, with_results=True)
+        training_results["id"] = member_id
+
+        return BinnedSpecialistModel(
+            bins=[
+                VariableBin(
+                    var_name=et_col,
+                    low=row["et_bin.low"],
+                    high=row["et_bin.high"],
+                    closed=row["et_bin.closed"],
+                ),
+                AbsoluteVariableBin(
+                    var_name=eta_col,
+                    low=row["eta_bin.low"],
+                    high=row["eta_bin.high"],
+                    closed=row["eta_bin.closed"],
+                ),
+            ],
+            keras_model=keras_model,
+            preprocessing=preprocessing_pipeline,
+            training_results=training_results,
+        )
+
+    def get_specialist_committee(
+        self,
+        et_col: str | None = None,
+        eta_col: str | None = None,
+        rings_col: str | None = None,
+    ) -> BinnedSpecialistCommittee:
+        """Build a specialist committee from selected trained members.
+
+        Parameters
+        ----------
+        et_col : str or None, default=None
+            Et column name. Uses job default when ``None``.
+        eta_col : str or None, default=None
+            Eta column name. Uses job default when ``None``.
+        rings_col : str or None, default=None
+            Rings column name. Uses job default when ``None``.
+
+        Returns
+        -------
+        BinnedSpecialistCommittee
+            Committee composed of all selected specialist members.
+        """
+
+        if et_col is None:
+            et_col = self.et_col
+
+        if eta_col is None:
+            eta_col = self.eta_col
+
+        if rings_col is None:
+            rings_col = self.rings_col
+
+        member_ids = self.selected_models.select(pl.col("id")).to_series().to_list()
+        binned_models = [
+            self.get_specialist_model(
+                member_id=member_id,
+                et_col=et_col,
+                eta_col=eta_col,
+                rings_col=rings_col,
+            )
+            for member_id in member_ids
+        ]
+
+        return BinnedSpecialistCommittee(models=binned_models)
 
     def submit(self):
 
         logger = logging.getLogger(self.logger_name)
-        logger.info(
-            f"Starting job with model {self.model_factory.name} on dataset at {self.dataset_dir}"
-        )
+        logger.info(f"Starting job with model {self.model_factory.name} on dataset at {self.dataset_dir}")
         self.output_path.mkdir(parents=True, exist_ok=True)
         self.output_path.joinpath("config.json").write_text(
             self.model_dump_json(indent=4),
@@ -736,9 +765,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
             for member_id, (et_bin, eta_bin, fold, init) in enumerate(iterator):
                 member_output_path = self.get_member_output_dir(member_id)
                 try:
-                    RingerKerasTrainingJob.validate_saved_member_directory(
-                        member_output_path
-                    )
+                    RingerKerasTrainingJob.validate_saved_member_directory(member_output_path)
                     logger.info(
                         f"{member_id}: Member directory {member_output_path} already exists and is valid. Skipping training."
                     )
@@ -762,21 +789,15 @@ class RingerKerasTrainingJob(YamlBaseModel):
 
         if isinstance(dependent_executor, AutoExecutor) and submitted_jobs:
             dependency_string = ":".join(str(job.job_id) for job in submitted_jobs)
-            logger.info(
-                f"Submitting dependent job with dependency on jobs: {dependency_string}"
-            )
+            logger.info(f"Submitting dependent job with dependency on jobs: {dependency_string}")
             dependent_executor.update_parameters(
-                slurm_additional_parameters={
-                    "dependency": f"afterok:{dependency_string}"
-                }
+                slurm_additional_parameters={"dependency": f"afterok:{dependency_string}"}
             )
         dependent_executor.submit(self.post_training)
 
         logger.info("All jobs submitted.")
 
-    def _run_training(
-        self, member_id: int, et_bin: dict, eta_bin: dict, fold: int, init: int
-    ):
+    def _run_training(self, member_id: int, et_bin: dict, eta_bin: dict, fold: int, init: int):
         from neuralnet.models.keras.routines import fit_routine
         from keras import Model
 
@@ -798,9 +819,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
         }
         output_dir = self.get_member_output_dir(member_id)
         output_dir.mkdir(parents=True, exist_ok=True)
-        model_factory = self.model_factory.model_copy(
-            update=dict(name=f"{self.model_factory.name}_{member_id}")
-        )
+        model_factory = self.model_factory.model_copy(update={"name": f"{self.model_factory.name}_{member_id}"})
         model: Model = model_factory.as_keras()
         if self.balance_class_weights:
             class_weights = dataset.train_class_weights()
@@ -970,12 +989,8 @@ class RingerKerasTrainingJob(YamlBaseModel):
             "eta_bin.high",
             "eta_bin.closed",
         ]
-        best_init_results = all_model_results_df.group_by(*bins_cols, "fold").agg(
-            self.best_init.select_best_expr()
-        )
-        selected_models = best_init_results.group_by(*bins_cols).agg(
-            self.best_fold.select_best_expr()
-        )
+        best_init_results = all_model_results_df.group_by(*bins_cols, "fold").agg(self.best_init.select_best_expr())
+        selected_models = best_init_results.group_by(*bins_cols).agg(self.best_fold.select_best_expr())
         selected_models.write_parquet(self.selected_models_path)
 
     @staticmethod
@@ -988,9 +1003,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
         if not (output_path / "config.json").exists():
             raise FileNotFoundError(f"Config file not found in {output_path}.")
         if not (output_path / "all_models_results.parquet").exists():
-            raise FileNotFoundError(
-                f"All models results file not found in {output_path}."
-            )
+            raise FileNotFoundError(f"All models results file not found in {output_path}.")
         if not (output_path / "selected_models.parquet").exists():
             raise FileNotFoundError(f"Selected models file not found in {output_path}.")
 
@@ -1001,13 +1014,9 @@ class RingerKerasTrainingJob(YamlBaseModel):
     def validate_saved_member_directory(member_output_path: Path | str):
         member_output_path = Path(member_output_path)
         if not member_output_path.exists():
-            raise FileNotFoundError(
-                f"Member directory {member_output_path} does not exist."
-            )
+            raise FileNotFoundError(f"Member directory {member_output_path} does not exist.")
         if not member_output_path.is_dir():
-            raise NotADirectoryError(
-                f"Member directory {member_output_path} is not a directory."
-            )
+            raise NotADirectoryError(f"Member directory {member_output_path} is not a directory.")
 
         model_path = member_output_path / "model.keras"
         if not model_path.exists():
@@ -1025,6 +1034,12 @@ class RingerKerasTrainingJob(YamlBaseModel):
             config = json.load(f)
         instance = cls(**config)
         return instance
+
+    @overload
+    def get_member_model(self, member_id: int, with_results: Literal[False] = False) -> "Sequential": ...
+
+    @overload
+    def get_member_model(self, member_id: int, with_results: Literal[True]) -> tuple["Sequential", TrainingResult]: ...
 
     def get_member_model(self, member_id: int, with_results: bool = False):
         member_output_dir = self.get_member_output_dir(member_id)

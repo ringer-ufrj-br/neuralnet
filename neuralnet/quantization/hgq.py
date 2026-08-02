@@ -41,12 +41,17 @@ class HGQFixedPointConfig(BaseModel):
         ),
     ]
 
-    def as_hgq_quantizer_config(self, place: Literal["kernel", "bias"]):
+    object_type: Annotated[
+        Literal["hgq_fixed_point"],
+        Field(description='Layer name. Must be "hgq_fixed_point"')
+    ] = "hgq_fixed_point"
+
+    def as_hgq_quantizer_config(self, place: Literal["weight", "bias"]):
         """Create an hgq2 quantizer configuration from fixed-point settings.
 
         Parameters
         ----------
-        place : {"kernel", "bias"}
+        place : {"weight", "bias"}
             Target tensor place for the quantizer configuration.
 
         Returns
