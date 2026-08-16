@@ -56,8 +56,10 @@ class AlternativeNorm1(BaseModel):
 
         return self.get_polars_expr()
 
-    def fixed_point_quantization(self, quantizer: FixedPointQuantizer) -> "FixedPointQuantizedAlternativeNorm1":
-        return FixedPointQuantizedAlternativeNorm1(input_cols=self.input_cols, suffix=self.suffix, quantizer=quantizer)
+    def fixed_point_quantization(self, quantizer: FixedPointQuantizer | dict) -> "FixedPointQuantizedAlternativeNorm1":
+        if isinstance(quantizer, dict):
+            quantizer = FixedPointQuantizer(**quantizer)
+        return FixedPointQuantizedAlternativeNorm1(input_cols=self.input_cols, quantizer=quantizer)
 
     @overload
     def __call__(self, data: pl.DataFrame, passthrough: bool = False) -> pl.DataFrame: ...
@@ -70,11 +72,6 @@ class AlternativeNorm1(BaseModel):
         if passthrough:
             return data.with_columns(*expr)
         return data.select(*expr)
-
-    def fixed_point_quantize(self, quantizer: FixedPointQuantizer) -> "FixedPointQuantizedAlternativeNorm1":
-        return FixedPointQuantizedAlternativeNorm1(
-            input_cols=self.input_cols, output_col=self.output_col, quantizer=quantizer
-        )
 
 
 class FixedPointQuantizedAlternativeNorm1(AlternativeNorm1):

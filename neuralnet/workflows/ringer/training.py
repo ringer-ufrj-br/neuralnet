@@ -24,6 +24,7 @@ import numpy as np
 from functools import cached_property
 import json
 from zipfile import ZipFile, ZIP_DEFLATED
+
 # from ...json import cast_to_json_value
 from ...submitit import ExecutorConfig
 from ...logging import LoggerName
@@ -44,6 +45,7 @@ from ...models.keras.factories import (
 )
 from ...models.binned_committee import VariableBin
 from .models import BinnedSpecialistCommittee, BinnedSpecialistModel
+from .fields import RingFractionType
 from ...models.dense import (
     MLPFactory,
     FixedPointQuantizedMLP,
@@ -110,13 +112,6 @@ type NormStrategyType = Annotated[
     Literal["l1"] | FixedPointAlternativeNormL1 | None,
     Field(
         description="Normalization strategy to apply to the rings. If None, no normalization is applied. If 'l1', each ring is divided by the sum of all rings for that sample.",
-    ),
-]
-
-type RingFractionType = Annotated[
-    int,
-    Field(
-        description="Fraction of the rings to be used for training. If 2, takes the first half of the rings for each layer. If 3, takes the first third of the rings, and so on.",
     ),
 ]
 
@@ -472,9 +467,8 @@ class RingerKerasTrainingJob(YamlBaseModel):
         Field(description="Slurm configuration for running the training job on a Slurm cluster"),
     ]
     output_path: Annotated[
-        Path,
-        Field(description="Path to save the results of the job"),
-        PlainSerializer(str, return_type=str)]
+        Path, Field(description="Path to save the results of the job"), PlainSerializer(str, return_type=str)
+    ]
 
     # Misc
     logger_name: LoggerName = None
@@ -745,9 +739,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
         self.output_path.mkdir(parents=True, exist_ok=True)
         config_dict = self.model_dump()
         config_dict.pop("output_path")
-        self.output_path.joinpath("config.json").write_text(
-            json.dumps(config_dict, indent=4), encoding="utf-8"
-        )
+        self.output_path.joinpath("config.json").write_text(json.dumps(config_dict, indent=4), encoding="utf-8")
 
         dataset = RingerParquetDataset(
             dataset_dir=self.dataset_dir,

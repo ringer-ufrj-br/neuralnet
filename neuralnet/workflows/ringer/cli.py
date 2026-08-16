@@ -5,6 +5,7 @@ from ...pydantic import pydantic_to_markdown_schema
 from .training import RingerKerasTrainingJob
 from .inference import InferenceJob, PTQConversionJob, FixedPointInferenceJob
 from .threshold_fit import RingerCommitteeThresholdFitJob
+from .alternative_norm1 import AlternativeNorm1Analysis
 
 
 app = typer.Typer(help="Ringer Committee command line interface", rich_markup_mode="markdown")
@@ -123,4 +124,30 @@ def threshold_fit(
     ],
 ):
     job = RingerCommitteeThresholdFitJob.from_yaml(config)
+    job.submit()
+
+
+RUN_ALTERNATIVE_NORM1_HELP = "Run AlternativeNorm1 quantization analysis"
+
+
+@app.command(
+    name="alternative-norm1",
+    short_help=RUN_ALTERNATIVE_NORM1_HELP,
+    help=(
+        f"{RUN_ALTERNATIVE_NORM1_HELP}\n\n"
+        "This command analyzes the impact of fixed-point quantization on AlternativeNorm1 "
+        "by computing MSE, MAE, MAPE, and KL divergence across configurable bit ranges.\n\n"
+        f"{pydantic_to_markdown_schema(AlternativeNorm1Analysis)}"
+    ),
+)
+def alternative_norm1(
+    config: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            help="Path to the YAML configuration file for the AlternativeNorm1 analysis",
+        ),
+    ],
+):
+    job = AlternativeNorm1Analysis.from_yaml(config)
     job.submit()

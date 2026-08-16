@@ -908,8 +908,6 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
         committee_df = all_training_results_df.select(*exprs).with_columns(*second_level_exprs)
         return committee_df.row(0, named=True)
 
-
-
     @staticmethod
     def _validate_saved_directory(path: Path) -> None:
         """Assert that ``path`` is a completed threshold-fit output directory.
