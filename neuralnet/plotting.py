@@ -146,7 +146,7 @@ def plot_variable_distribution_comparison(
     top_legend_kwargs: dict | None = None,
     bottom_legend_kwargs: dict | None = None,
     bottom_ax_set: dict | None = None,
-    scatter: bool = False
+    scatter: bool = False,
 ) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
     if fig_kwargs is None:
         fig = plt.figure()
@@ -198,8 +198,8 @@ def plot_variable_distribution_comparison(
             y=ref_heights,
             label=ref["label"],
             color=ref["color"],
-            marker=ref['marker'] if 'marker' in ref else 'o',
-            edgecolor='k',
+            marker=ref["marker"] if "marker" in ref else "o",
+            edgecolor="k",
             alpha=0.5,
         )
 
@@ -222,8 +222,8 @@ def plot_variable_distribution_comparison(
                 y=heights,
                 label=var["label"],
                 color=var["color"],
-                marker=var['marker'] if 'marker' in var else 'o',
-                edgecolor='k',
+                marker=var["marker"] if "marker" in var else "o",
+                edgecolor="k",
                 alpha=0.5,
             )
         rel_diff = ((heights - ref_heights) / ref_heights) * 100
@@ -233,23 +233,39 @@ def plot_variable_distribution_comparison(
             height=rel_diff,
             width=np.diff(ref_bins),
             alpha=0.5,
-            color='none',
+            color="none",
             edgecolor=var["color"],
             label=var["label"],
         )
     top_ax.grid(linestyle="--", alpha=0.1, color="k")
-    top_ax.set_ylabel("Density", fontsize='medium')
+    top_ax.set_ylabel("Density", fontsize="medium")
     top_ax.set_yscale(scale)
-    top_ax.tick_params(axis="x", which="both", bottom=False,)
-    top_ax.tick_params(axis="y", which="both", labelsize='small',)
+    top_ax.tick_params(
+        axis="x",
+        which="both",
+        bottom=False,
+    )
+    top_ax.tick_params(
+        axis="y",
+        which="both",
+        labelsize="small",
+    )
     if title is not None:
-        top_ax.set_title(title, fontsize='large')
+        top_ax.set_title(title, fontsize="large")
     bottom_ax.grid(linestyle="--", alpha=0.1, color="k")
-    bottom_ax.axhline(0, color='k', linestyle='--', alpha=0.5)
-    bottom_ax.set_xlabel(variable_label, fontsize='medium')
-    bottom_ax.set_ylabel(f"Diff to {ref['label']} (%)", fontsize='medium')
-    bottom_ax.tick_params(axis="x", which="both", labelsize='small',)
-    bottom_ax.tick_params(axis="y", which="both", labelsize='small',)
+    bottom_ax.axhline(0, color="k", linestyle="--", alpha=0.5)
+    bottom_ax.set_xlabel(variable_label, fontsize="medium")
+    bottom_ax.set_ylabel(f"Diff to {ref['label']} (%)", fontsize="medium")
+    bottom_ax.tick_params(
+        axis="x",
+        which="both",
+        labelsize="small",
+    )
+    bottom_ax.tick_params(
+        axis="y",
+        which="both",
+        labelsize="small",
+    )
     if bottom_ax_set is not None:
         bottom_ax.set(**bottom_ax_set)
 
@@ -257,3 +273,64 @@ def plot_variable_distribution_comparison(
     bottom_ax.legend(**bottom_legend_kwargs)
 
     return fig, top_ax, bottom_ax
+
+
+def plot_roc_curve(
+    data: pl.LazyFrame | pl.DataFrame,
+    tpr_col: str,
+    fpr_col: str,
+    threshold_fit_results: dict,
+    references: dict,
+    et_bin: dict,
+    eta_bin: dict,
+) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
+
+    fig, ax = plt.subplots()
+    if isinstance(data, pl.LazyFrame):
+        data = data.collect()
+    fpr = data[fpr_col].to_numpy()
+    tpr = data[tpr_col].to_numpy()
+    ax.grid(linestyle="--", alpha=0.1, color="k")
+    ax.plot(fpr, tpr, label="ROC Curve", color="tab:blue")
+
+    ax_inset = ax.inset_axes([0.45, 0.3, 0.5, 0.45])
+    # Plot ROC curve and elbow on the inset axis
+    ax_inset.plot(fpr, tpr, color="tab:blue")
+    # ax_inset.plot(elbow_fpr, elbow_tpr, 'ro', markersize=6)
+    ax_inset.grid(linestyle="--", alpha=0.3)
+    ref_tprs = []
+    ref_fprs = []
+
+    for ref, ref_info in references.items():
+        ref_result = threshold_fit_results[ref]
+        ref_tpr = ref_result["tpr"]
+        ref_tprs.append(ref_tpr)
+        ref_fpr = ref_result["fpr"]
+        ref_fprs.append(ref_fpr)
+        ax.plot(
+            ref_fpr,
+            ref_tpr,
+            "ro",
+            color=ref_info["color"],
+            label=f"{ref_info['label']} (FPR={ref_fpr * 100:.2f}%, TPR={ref_tpr * 100:.2f}%)",
+        )
+        ax_inset.plot(ref_fpr, ref_tpr, "ro", markersize=6, color=ref_info["color"])
+
+    # Set zoom limits centered around the operation points
+    ax_inset.set_xlim(min(ref_fprs) * 0.9, max(ref_fprs) * 1.05)
+    ax_inset.set_ylim(min(ref_tprs) * 0.9, max(ref_tprs) * 1.05)
+    # Draw indicator box and connecting lines from the main axis to the inset
+    ax.indicate_inset_zoom(ax_inset, edgecolor="red", alpha=0.7)
+    ax.legend(loc="lower left")
+    et_high = et_bin["high"]
+    if et_high == "Infinity":
+        et_high_label = "\\infty"
+    else:
+        et_high_label = int(et_high * 1e-3)
+    ax.set_title(
+        f"$E_T \\in [{int(et_bin['low'] * 1e-3)}, {et_high_label})$ and $|\\eta| \\in [{eta_bin['low'] * 1e-3:.2f}, {eta_bin['high'] * 1e-3:.2f})$"
+    )
+    ax.set_xlabel("Fake Postive Rate")
+    ax.set_ylabel("True Positve Rate")
+    fig.tight_layout()
+    return fig, ax, ax_inset

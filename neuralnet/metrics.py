@@ -136,6 +136,7 @@ def enhanced_confusion_matrix_from_polars(data: pl.LazyFrame | pl.DataFrame, lab
         .sort(score_col, descending=True)
         # 4. Calculate True Positives and False Positives cumulatively
         .select(
+            pl.col(score_col).alias("threshold"),
             pl.col("pos_count").cum_sum().alias("tp"),
             pl.col("neg_count").cum_sum().alias("fp"),
             pl.col("pos_count").sum().alias("positives"),

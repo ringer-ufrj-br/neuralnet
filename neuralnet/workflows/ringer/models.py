@@ -1,11 +1,13 @@
 from functools import cached_property
-from typing import TYPE_CHECKING, Protocol, Self, overload, runtime_checkable
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, overload, runtime_checkable
 import logging
 
 import numpy as np
 import polars as pl
+from pydantic import BaseModel, ConfigDict, Field
 
-from ...bins import VariableBin
+from ...bins import AbsoluteVariableBin, VariableBin
 from ...quantization.quantizers import FixedPointQuantizer
 
 if TYPE_CHECKING:
@@ -453,3 +455,295 @@ class BinnedSpecialistCommittee:
             for model in self.models
         ]
         return BinnedSpecialistCommittee(models=quantized_models)
+
+    @classmethod
+    def from_json(
+        cls,
+        path: str | Path | dict,
+        op_point: str | None = None,
+        dataset_type: str = "test",
+        et_col: str | None = None,
+        eta_col: str | None = None,
+        rings_col: str | None = None,
+    ) -> "BinnedSpecialistCommittee":
+        """Load a specialist committee pipeline from an exported operating-point JSON.
+
+        Reconstructs the full committee pipeline (bins, preprocessing, trained
+        models, and decision thresholds) from a configuration file exported by
+        :class:`~neuralnet.workflows.ringer.threshold_fit.RingerCommitteeThresholdFitJob`.
+        Validates the configuration schema using :class:`SpecialistCommitteeConfig`.
+
+        Parameters
+        ----------
+        path : str or Path or dict
+            Path to the JSON file (e.g. ``tight.json``), path to the directory
+            containing it (with ``op_point`` specified), or an already-parsed
+            dictionary.
+        op_point : str or None, default=None
+            Operating point name (e.g. ``"tight"``). Required if ``path`` is a
+            directory; optional if ``path`` is a direct path to a JSON file.
+        dataset_type : str, default="test"
+            Dataset split name to select the decision threshold from (e.g.
+            ``"test"``, ``"val"``, ``"train"``).
+        et_col : str or None, default=None
+            Optional override for the Et column name.
+        eta_col : str or None, default=None
+            Optional override for the Eta column name.
+        rings_col : str or None, default=None
+            Optional override for the Rings column name.
+
+        Returns
+        -------
+        BinnedSpecialistCommittee
+            Fully reconstructed committee pipeline ready for inference.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the JSON configuration or any member model file is not found.
+        ValueError
+            If configuration structure is invalid or missing required models.
+        """
+        import json
+
+        if isinstance(path, dict):
+            data = path
+            base_dir = Path.cwd()
+        else:
+            path_obj = Path(path)
+            if path_obj.is_dir():
+                if op_point is None:
+                    raise ValueError("op_point must be provided when path is a directory (e.g. op_point='tight').")
+                json_path = path_obj / f"{op_point}.json"
+            else:
+                json_path = path_obj
+
+            if not json_path.exists():
+                raise FileNotFoundError(f"Configuration file not found: {json_path}")
+
+            with json_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            base_dir = json_path.parent
+
+        committee_config = SpecialistCommitteeConfig(**data)
+        return committee_config.build_committee(
+            base_dir=base_dir,
+            dataset_type=dataset_type,
+            et_col=et_col,
+            eta_col=eta_col,
+            rings_col=rings_col,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Pydantic validation models for operating-point JSON files
+# ---------------------------------------------------------------------------
+
+
+class SpecialistBinConfig(BaseModel):
+    """Configuration schema for a single specialist bin boundary."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    type: Literal["VariableBin", "AbsoluteVariableBin"] = "VariableBin"
+    var_name: str = Field(description="Name of the variable used for binning.")
+    low: float = Field(description="Lower bound of the bin.")
+    high: float = Field(description="Upper bound of the bin.")
+    closed: Literal["left", "right", "both", "none", "neither"] = Field(
+        default="left", description="Bin interval closure side."
+    )
+
+    def to_bin(
+        self,
+        et_col: str | None = None,
+        eta_col: str | None = None,
+    ) -> VariableBin | AbsoluteVariableBin:
+        """Construct the runtime VariableBin or AbsoluteVariableBin instance."""
+        var_name = self.var_name
+        if self.type == "AbsoluteVariableBin" or "eta" in var_name:
+            if eta_col is not None:
+                var_name = eta_col
+            return AbsoluteVariableBin(
+                var_name=var_name,
+                low=self.low,
+                high=self.high,
+                closed=self.closed,
+            )
+        else:
+            if et_col is not None:
+                var_name = et_col
+            return VariableBin(
+                var_name=var_name,
+                low=self.low,
+                high=self.high,
+                closed=self.closed,
+            )
+
+
+class SpecialistPreprocessingConfig(BaseModel):
+    """Configuration schema for the specialist preprocessing pipeline."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    rings_col: str = Field(default="rings", description="Input rings column name.")
+    ring_fraction: int = Field(default=2, gt=0, description="Fraction of rings retained per layer.")
+    norm_strategy: str | None = Field(default="l1", description="Normalization strategy name.")
+
+    def to_pipeline(self, rings_col: str | None = None) -> Tranformation:
+        """Build the PreprocessingPipeline instance."""
+        from .training import PreprocessingPipeline
+
+        eff_rings_col = rings_col if rings_col is not None else self.rings_col
+        return PreprocessingPipeline.from_job_params(
+            rings_col=eff_rings_col,
+            ring_fraction=self.ring_fraction,
+            norm_strategy=self.norm_strategy,
+        )
+
+
+class SpecialistMemberConfig(BaseModel):
+    """Configuration schema for a single specialist committee member."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    id: int = Field(description="Unique member identifier.")
+    fold: int | None = Field(default=None, description="Training fold index.")
+    model_path: str = Field(description="Relative or absolute path to the Keras model file.")
+    decision_threshold: float | None = Field(default=None, description="Fitted decision threshold.")
+    bins: list[SpecialistBinConfig] = Field(min_length=1, description="Bin definitions defining the specialist region.")
+    preprocessing: SpecialistPreprocessingConfig | None = Field(
+        default=None, description="Member-specific preprocessing configuration."
+    )
+    threshold_fit_results: dict[str, dict[str, Any]] | None = Field(
+        default=None, description="Split-by-split threshold fit outcomes."
+    )
+    training_results: dict[str, Any] | None = Field(
+        default=None, description="Training metadata associated with this member."
+    )
+
+    def build_specialist_model(
+        self,
+        base_dir: Path,
+        dataset_type: str = "test",
+        et_col: str | None = None,
+        eta_col: str | None = None,
+        rings_col: str | None = None,
+        fallback_preprocessing: SpecialistPreprocessingConfig | None = None,
+    ) -> BinnedSpecialistModel:
+        """Build a BinnedSpecialistModel instance from this configuration."""
+        from keras.models import load_model
+        from ...quantization.keras import FixedPointQuantizationDense
+
+        # 1. Model weights
+        model_p = Path(self.model_path)
+        if not model_p.is_absolute():
+            model_file = base_dir / model_p
+        else:
+            model_file = model_p
+
+        if not model_file.exists():
+            raise FileNotFoundError(f"Model weight file not found at {model_file}")
+
+        keras_model = load_model(
+            model_file,
+            custom_objects={"FixedPointQuantizationDense": FixedPointQuantizationDense},
+        )
+
+        # 2. Preprocessing
+        prep_cfg = self.preprocessing or fallback_preprocessing or SpecialistPreprocessingConfig()
+        preprocessing = prep_cfg.to_pipeline(rings_col=rings_col)
+
+        # 3. Bins
+        bins = [b.to_bin(et_col=et_col, eta_col=eta_col) for b in self.bins]
+
+        # 4. Decision threshold
+        decision_threshold = self.decision_threshold
+        if self.threshold_fit_results and dataset_type in self.threshold_fit_results:
+            threshold_val = self.threshold_fit_results[dataset_type]
+            if isinstance(threshold_val, dict) and "threshold" in threshold_val:
+                decision_threshold = float(threshold_val["threshold"])
+            else:
+                decision_threshold = float(threshold_val)
+
+        return BinnedSpecialistModel(
+            bins=bins,
+            keras_model=keras_model,
+            preprocessing=preprocessing,
+            decision_threshold=decision_threshold,
+            fold=self.fold,
+            training_results=self.training_results,
+        )
+
+
+class OperatingPointReferenceConfig(BaseModel):
+    """Configuration schema for reference operating point metadata."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    tpr: float | None = Field(default=None, description="Target true positive rate.")
+    color: str | None = Field(default=None, description="Matplotlib color code.")
+    label: str | None = Field(default=None, description="Human-readable reference label.")
+
+
+class SpecialistCommitteeConfig(BaseModel):
+    """Pydantic validation model for exported specialist committee JSON files.
+
+    Validates the structure of operating-point JSON configuration files (e.g.
+    ``tight.json``, ``medium.json``) generated by
+    :class:`~neuralnet.workflows.ringer.threshold_fit.RingerCommitteeThresholdFitJob`.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    op_point: str = Field(description="Operating point identifier (e.g. 'tight').")
+    reference: OperatingPointReferenceConfig | dict[str, Any] | None = Field(
+        default=None, description="Target operating point metadata."
+    )
+    preprocessing: SpecialistPreprocessingConfig | None = Field(
+        default=None, description="Default preprocessing configuration across all members."
+    )
+    dataset_types: list[str] | None = Field(default=None, description="Evaluated dataset split names.")
+    models: list[SpecialistMemberConfig] = Field(
+        min_length=1, description="List of specialist committee member configurations."
+    )
+
+    def build_committee(
+        self,
+        base_dir: Path,
+        dataset_type: str = "test",
+        et_col: str | None = None,
+        eta_col: str | None = None,
+        rings_col: str | None = None,
+    ) -> BinnedSpecialistCommittee:
+        """Construct the complete BinnedSpecialistCommittee pipeline.
+
+        Parameters
+        ----------
+        base_dir : Path
+            Base directory used to resolve relative model weight paths.
+        dataset_type : str, default="test"
+            Dataset split name to select the decision threshold from.
+        et_col : str or None, default=None
+            Optional override for the Et column name.
+        eta_col : str or None, default=None
+            Optional override for the Eta column name.
+        rings_col : str or None, default=None
+            Optional override for the Rings column name.
+
+        Returns
+        -------
+        BinnedSpecialistCommittee
+            Fully assembled committee instance.
+        """
+        specialist_models = [
+            m.build_specialist_model(
+                base_dir=base_dir,
+                dataset_type=dataset_type,
+                et_col=et_col,
+                eta_col=eta_col,
+                rings_col=rings_col,
+                fallback_preprocessing=self.preprocessing,
+            )
+            for m in self.models
+        ]
+        return BinnedSpecialistCommittee(models=specialist_models)
