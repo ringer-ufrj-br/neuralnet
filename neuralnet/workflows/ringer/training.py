@@ -17,13 +17,14 @@ if TYPE_CHECKING:
     from keras import Sequential
 
 from itertools import product
-from pydantic import AfterValidator, Field, ConfigDict, BaseModel
+from pydantic import AfterValidator, Field, ConfigDict, BaseModel, PlainSerializer
 import logging
 from pathlib import Path
 import numpy as np
 from functools import cached_property
 import json
 from zipfile import ZipFile, ZIP_DEFLATED
+# from ...json import cast_to_json_value
 from ...submitit import ExecutorConfig
 from ...logging import LoggerName
 from ...datasets.ringer import (
@@ -470,7 +471,10 @@ class RingerKerasTrainingJob(YamlBaseModel):
         ExecutorConfig,
         Field(description="Slurm configuration for running the training job on a Slurm cluster"),
     ]
-    output_path: Annotated[Path, Field(description="Path to save the results of the job")]
+    output_path: Annotated[
+        Path,
+        Field(description="Path to save the results of the job"),
+        PlainSerializer(str, return_type=str)]
 
     # Misc
     logger_name: LoggerName = None
@@ -739,9 +743,11 @@ class RingerKerasTrainingJob(YamlBaseModel):
         logger = logging.getLogger(self.logger_name)
         logger.info(f"Starting job with model {self.model_factory.name} on dataset at {self.dataset_dir}")
         self.output_path.mkdir(parents=True, exist_ok=True)
-        config_dict = self.model_dump_json()
+        config_dict = self.model_dump()
         config_dict.pop("output_path")
-        self.output_path.joinpath("config.json").write_text(json.dumps(config_dict, indent=4), encoding="utf-8")
+        self.output_path.joinpath("config.json").write_text(
+            json.dumps(config_dict, indent=4), encoding="utf-8"
+        )
 
         dataset = RingerParquetDataset(
             dataset_dir=self.dataset_dir,

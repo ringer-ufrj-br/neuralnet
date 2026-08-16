@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Annotated, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer
 import submitit
 
 
@@ -44,7 +44,9 @@ class ExecutorConfig(BaseModel):
         ),
     ]
     logs_dir: Annotated[
-        Path, Field(description="Directory to save the logs of the slurm jobs")
+        Path,
+        Field(description="Directory to save the logs of the slurm jobs"),
+        PlainSerializer(str, return_type=str)
     ]
     name: Annotated[str, Field(description="Name of the job")]
     slurm_array_parallelism: Annotated[

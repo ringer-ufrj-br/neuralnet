@@ -8,14 +8,16 @@ from pathlib import Path
 from typing import Annotated
 from functools import cached_property
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer
 import polars as pl
 
 
 type RefType = dict[str, dict[str, dict[str, float]]]
 
 type DirectoryType = Annotated[
-    Path, Field(description="Path to the directory containing the dataset files.")
+    Path,
+    Field(description="Path to the directory containing the dataset files."),
+    PlainSerializer(str, return_type=str)
 ]
 
 
