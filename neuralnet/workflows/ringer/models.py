@@ -1,11 +1,12 @@
 from functools import cached_property
-from typing import TYPE_CHECKING, Protocol, overload, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, Self, overload, runtime_checkable
 import logging
 
 import numpy as np
 import polars as pl
 
 from ...bins import VariableBin
+from ...quantization.quantizers import FixedPointQuantizer
 
 if TYPE_CHECKING:
     from keras import Sequential
@@ -249,6 +250,49 @@ class BinnedSpecialistModel:
             f"Unsupported data type for prediction: {type(data)}. Expected polars DataFrame or polars LazyFrame."
         )
 
+    def fixed_point_quantization(
+        self, norm_quantizer: "FixedPointQuantizer", nn_quantizer: "FixedPointQuantizer"
+    ) -> Self:
+        """Create a quantized copy of this specialist inference model.
+
+        Parameters
+        ----------
+        norm_quantizer : FixedPointQuantizer
+            Quantizer applied to the preprocessing pipeline.
+        nn_quantizer : FixedPointQuantizer
+            Quantizer applied to the Keras model weights.
+
+        Returns
+        -------
+        Self
+            New ``BinnedSpecialistModel`` instance with a quantized Keras model and preprocessing.
+        """
+
+        from ...quantization.keras import fixed_point_quantize
+
+        if isinstance(nn_quantizer, dict):
+            nn_quantizer = FixedPointQuantizer(**nn_quantizer)
+
+        if isinstance(norm_quantizer, dict):
+            norm_quantizer = FixedPointQuantizer(**norm_quantizer)
+
+        quantized_keras_model = fixed_point_quantize(
+            self.keras_model,
+            floating_bits=nn_quantizer.fractional_bits,
+            integer_bits=nn_quantizer.integer_bits,
+        )
+
+        quantized_preprocessing = self.preprocessing.fixed_point_quantization(norm_quantizer)
+
+        return BinnedSpecialistModel(
+            bins=self.bins,
+            keras_model=quantized_keras_model,
+            preprocessing=quantized_preprocessing,
+            decision_threshold=self.decision_threshold,
+            fold=self.fold,
+            training_results=self.training_results,
+        )
+
 
 class BinnedSpecialistCommittee:
     """Collection of specialist models for bin-conditioned inference."""
@@ -376,7 +420,7 @@ class BinnedSpecialistCommittee:
             model_predictions = model.predict(data, batch_size=batch_size, passthrough=False)
             if with_specialist_id:
                 model_predictions = model_predictions.with_columns(
-                    pl.lit(self.models.training_results["id"], dtype=pl.UInt32).alias("specialist_id")
+                    pl.lit(model.training_results["id"], dtype=pl.UInt32).alias("specialist_id")
                 )
             predictions.append(model_predictions)
 
@@ -385,3 +429,27 @@ class BinnedSpecialistCommittee:
         if passthrough:
             results = data.join(results, on="id", how="left")
         return results
+
+    def fixed_point_quantization(
+        self, norm_quantizer: "FixedPointQuantizer", nn_quantizer: "FixedPointQuantizer"
+    ) -> Self:
+        """Create a quantized copy of every specialist in the committee.
+
+        Parameters
+        ----------
+        norm_quantizer : FixedPointQuantizer
+            Quantizer applied to the preprocessing pipeline of each specialist.
+        nn_quantizer : FixedPointQuantizer
+            Quantizer applied to the Keras model weights of each specialist.
+
+        Returns
+        -------
+        Self
+            New ``BinnedSpecialistCommittee`` containing quantized specialist models.
+        """
+
+        quantized_models = [
+            model.fixed_point_quantization(norm_quantizer=norm_quantizer, nn_quantizer=nn_quantizer)
+            for model in self.models
+        ]
+        return BinnedSpecialistCommittee(models=quantized_models)

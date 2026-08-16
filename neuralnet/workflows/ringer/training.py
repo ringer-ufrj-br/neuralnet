@@ -61,6 +61,7 @@ from ...bins import (
     AbsoluteBinDict,
 )
 from ...quantization.quantizers import FixedPointQuantizer
+from ...quantization.keras import FixedPointQuantizationDense
 
 type BalanceClassWeightsType = Annotated[
     bool,
@@ -738,10 +739,9 @@ class RingerKerasTrainingJob(YamlBaseModel):
         logger = logging.getLogger(self.logger_name)
         logger.info(f"Starting job with model {self.model_factory.name} on dataset at {self.dataset_dir}")
         self.output_path.mkdir(parents=True, exist_ok=True)
-        self.output_path.joinpath("config.json").write_text(
-            self.model_dump_json(indent=4),
-            encoding="utf-8",
-        )
+        config_dict = self.model_dump_json()
+        config_dict.pop("output_path")
+        self.output_path.joinpath("config.json").write_text(json.dumps(config_dict, indent=4), encoding="utf-8")
 
         dataset = RingerParquetDataset(
             dataset_dir=self.dataset_dir,
@@ -1032,6 +1032,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
         config_path = path / "config.json"
         with config_path.open("r", encoding="utf-8") as f:
             config = json.load(f)
+        config["output_path"] = path
         instance = cls(**config)
         return instance
 
@@ -1050,7 +1051,9 @@ class RingerKerasTrainingJob(YamlBaseModel):
         model_path = member_output_dir / "model.keras"
         if not model_path.exists():
             raise FileNotFoundError(f"Model file not found at {model_path}")
-        model: Model = load_model(model_path)
+        model: Model = load_model(
+            model_path, custom_objects={"FixedPointQuantizationDense": FixedPointQuantizationDense}
+        )
 
         if not with_results:
             return model
