@@ -9,14 +9,10 @@ from .. import get_logger
 class RingSlicesPerLayer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    fraction: Annotated[
-        int, Field(gt=0, description="Fraction of rings to select per layer.")
-    ]
+    fraction: Annotated[int, Field(gt=0, description="Fraction of rings to select per layer.")]
     output_format: Annotated[
         Literal["expanded_columns"],
-        Field(
-            description="Output format for the selected rings. Currently, only 'expanded_columns' is supported."
-        ),
+        Field(description="Output format for the selected rings. Currently, only 'expanded_columns' is supported."),
     ] = "expanded_columns"
     rings_col: Annotated[
         str,
@@ -38,12 +34,7 @@ class RingSlicesPerLayer(BaseModel):
     def get_list_polars_expr(self) -> pl.Expr:
         idxs = get_ring_slices_per_layer(self.fraction)
         if self.output_format == "expanded_columns":
-            cols = [
-                pl.col(self.rings_col)
-                .list.get(i)
-                .alias(self.get_expanded_column_name(i))
-                for i in idxs
-            ]
+            cols = [pl.col(self.rings_col).list.get(i).alias(self.get_expanded_column_name(i)) for i in idxs]
             return cols
         else:
             raise ValueError(f"Unsupported output_format: {self.output_format}")
@@ -51,29 +42,18 @@ class RingSlicesPerLayer(BaseModel):
     def get_array_polars_expr(self) -> pl.Expr:
         idxs = get_ring_slices_per_layer(self.fraction)
         if self.output_format == "expanded_columns":
-            cols = [
-                pl.col(self.rings_col)
-                .arr.get(i)
-                .alias(self.get_expanded_column_name(i))
-                for i in idxs
-            ]
+            cols = [pl.col(self.rings_col).arr.get(i).alias(self.get_expanded_column_name(i)) for i in idxs]
             return cols
         else:
             raise ValueError(f"Unsupported output_format: {self.output_format}")
 
     @overload
-    def __call__(
-        self, data: pl.DataFrame, passthrough: bool = False
-    ) -> pl.DataFrame: ...
+    def __call__(self, data: pl.DataFrame, passthrough: bool = False) -> pl.DataFrame: ...
 
     @overload
-    def __call__(
-        self, data: pl.LazyFrame, passthrough: bool = False
-    ) -> pl.LazyFrame: ...
+    def __call__(self, data: pl.LazyFrame, passthrough: bool = False) -> pl.LazyFrame: ...
 
-    def __call__(
-        self, data: pl.DataFrame | pl.LazyFrame, passthrough: bool = False
-    ) -> pl.DataFrame | pl.LazyFrame:
+    def __call__(self, data: pl.DataFrame | pl.LazyFrame, passthrough: bool = False) -> pl.DataFrame | pl.LazyFrame:
         if isinstance(data, pl.DataFrame):
             schema = data.schema
         elif isinstance(data, pl.LazyFrame):
@@ -82,18 +62,14 @@ class RingSlicesPerLayer(BaseModel):
             raise TypeError(f"Expected pl.DataFrame or pl.LazyFrame, got {type(data)}")
 
         if self.rings_col not in schema:
-            raise ValueError(
-                f"Input column '{self.rings_col}' not found in the data schema."
-            )
+            raise ValueError(f"Input column '{self.rings_col}' not found in the data schema.")
 
         input_dtype = schema[self.rings_col]
         if isinstance(input_dtype, pl.List):
             polars_expr = self.get_list_polars_expr()
         elif isinstance(input_dtype, pl.Array):
             if not input_dtype.inner.is_float():
-                raise TypeError(
-                    f"Expected array of floats for column '{self.rings_col}', got {input_dtype.inner}"
-                )
+                raise TypeError(f"Expected array of floats for column '{self.rings_col}', got {input_dtype.inner}")
             polars_expr = self.get_array_polars_expr()
         else:
             raise TypeError(f"Expected list or array column, got {input_dtype}")
@@ -119,13 +95,8 @@ def compute_class_weight(
     Returns:
         dict[int, float]: A dictionary mapping each class label to its corresponding weight.
     """
-    class_counts_df = (
-        df.select(label_col).group_by(label_col).len(name="count").collect()
-    )
-    class_counts = {
-        int(row[label_col]): row["count"]
-        for row in class_counts_df.iter_rows(named=True)
-    }
+    class_counts_df = df.select(label_col).group_by(label_col).len(name="count").collect()
+    class_counts = {int(row[label_col]): row["count"] for row in class_counts_df.iter_rows(named=True)}
     logger = get_logger()
     for class_ in classes:
         if class_ not in class_counts:
@@ -135,7 +106,55 @@ def compute_class_weight(
     total_samples = sum(class_counts.values())
     n_classes = len(classes)
     class_weights = {
-        class_: total_samples / (n_classes * count) if count > 0 else 1.0
-        for class_, count in class_counts.items()
+        class_: total_samples / (n_classes * count) if count > 0 else 1.0 for class_, count in class_counts.items()
     }
     return class_weights
+
+
+@overload
+def unnest_structs(df: pl.DataFrame, separator: str = ".") -> pl.DataFrame: ...
+
+
+@overload
+def unnest_structs(df: pl.LazyFrame, separator: str = ".") -> pl.LazyFrame: ...
+
+
+def unnest_structs(df: pl.DataFrame | pl.LazyFrame, separator: str = ".") -> pl.DataFrame | pl.LazyFrame:
+    """
+    Recursively unnests all struct columns in a Polars DataFrame or LazyFrame.
+
+    Substitutes struct columns with their nested fields using the column naming
+    pattern: '<struct_col_name>.<nested_struct_field>.<field>'
+
+    Parameters
+    ----------
+    df : pl.DataFrame | pl.LazyFrame
+        The input Polars DataFrame or LazyFrame.
+    separator : str, default '.'
+        The separator string used between nested field names.
+
+    Returns
+    -------
+    pl.DataFrame | pl.LazyFrame
+        DataFrame with all structs expanded to primitive columns.
+    """
+    exprs: list[pl.Expr] = []
+
+    def _extract_fields(expr: pl.Expr, dtype: pl.DataType, path: str) -> None:
+        if isinstance(dtype, pl.Struct):
+            if not dtype.fields:
+                # Handle empty structs (if any)
+                exprs.append(expr.alias(path))
+            else:
+                for field in dtype.fields:
+                    _extract_fields(expr.struct.field(field.name), field.dtype, f"{path}{separator}{field.name}")
+        else:
+            exprs.append(expr.alias(path))
+
+    # Obtain schema (supports both DataFrame and LazyFrame)
+    schema = df.collect_schema() if hasattr(df, "collect_schema") else df.schema
+
+    for col_name, dtype in schema.items():
+        _extract_fields(pl.col(col_name), dtype, col_name)
+
+    return df.select(exprs)

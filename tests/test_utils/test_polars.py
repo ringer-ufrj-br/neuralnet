@@ -1,6 +1,7 @@
+from neuralnet.utils.polars import unnest_structs
 import pytest
 import polars as pl
-from neuralnet.utils.polars import RingSlicesPerLayer
+from neuralnet.utils.polars import RingSlicesPerLayer, unnest_structs
 from polars.testing import assert_frame_equal
 
 
@@ -201,3 +202,191 @@ class TestRingSlicesPerLayer:
             result = result.collect()
 
         assert_frame_equal(result, expected_result, check_dtype=True)
+
+
+class TestUnnestStructs:
+
+    @pytest.mark.parametrize("frame_factory", [pl.DataFrame, pl.LazyFrame])
+    def test_unnest_single_level_struct(self, frame_factory):
+        """Test unnesting a DataFrame/LazyFrame with a single level struct column."""
+        input_data = {
+            "id": [1, 2],
+            "info": [{"name": "alice", "age": 30}, {"name": "bob", "age": 25}],
+        }
+        df = frame_factory(input_data)
+        result = unnest_structs(df)
+
+        if isinstance(result, pl.LazyFrame):
+            result = result.collect()
+
+        expected = pl.DataFrame(
+            {
+                "id": [1, 2],
+                "info.name": ["alice", "bob"],
+                "info.age": [30, 25],
+            }
+        )
+        assert_frame_equal(result, expected)
+
+
+    @pytest.mark.parametrize("frame_factory", [pl.DataFrame, pl.LazyFrame])
+    def test_unnest_deeply_nested_struct(self, frame_factory):
+        """Test unnesting deeply nested struct columns."""
+        input_data = {
+            "a": [1],
+            "nested": [
+                {
+                    "b": {"c": 10, "d": 20},
+                    "e": {"f": {"g": 30}},
+                }
+            ],
+        }
+        df = frame_factory(input_data)
+        result = unnest_structs(df)
+
+        if isinstance(result, pl.LazyFrame):
+            result = result.collect()
+
+        expected = pl.DataFrame(
+            {
+                "a": [1],
+                "nested.b.c": [10],
+                "nested.b.d": [20],
+                "nested.e.f.g": [30],
+            }
+        )
+        assert_frame_equal(result, expected)
+
+
+    @pytest.mark.parametrize("frame_factory", [pl.DataFrame, pl.LazyFrame])
+    def test_custom_separator(self, frame_factory):
+        """Test unnesting structs with a custom separator."""
+        input_data = {
+            "user": [{"details": {"first": "John", "last": "Doe"}}],
+        }
+        df = frame_factory(input_data)
+        result = unnest_structs(df, separator="_")
+
+        if isinstance(result, pl.LazyFrame):
+            result = result.collect()
+
+        expected = pl.DataFrame(
+            {
+                "user_details_first": ["John"],
+                "user_details_last": ["Doe"],
+            }
+        )
+        assert_frame_equal(result, expected)
+
+
+    @pytest.mark.parametrize("frame_factory", [pl.DataFrame, pl.LazyFrame])
+    def test_no_struct_columns(self, frame_factory):
+        """Test that a DataFrame without struct columns is returned unchanged."""
+        input_data = {
+            "x": [1.0, 2.0],
+            "y": ["a", "b"],
+            "z": [[1, 2], [3, 4]],
+        }
+        df = frame_factory(input_data)
+        result = unnest_structs(df)
+
+        if isinstance(result, pl.LazyFrame):
+            result = result.collect()
+
+        expected = pl.DataFrame(input_data)
+        assert_frame_equal(result, expected)
+
+
+    @pytest.mark.parametrize("frame_factory", [pl.DataFrame, pl.LazyFrame])
+    def test_multiple_struct_columns(self, frame_factory):
+        """Test unnesting multiple struct columns in the same DataFrame."""
+        input_data = {
+            "s1": [{"a": 1, "b": 2}],
+            "val": [100],
+            "s2": [{"c": 3, "d": 4}],
+        }
+        df = frame_factory(input_data)
+        result = unnest_structs(df)
+
+        if isinstance(result, pl.LazyFrame):
+            result = result.collect()
+
+        expected = pl.DataFrame(
+            {
+                "s1.a": [1],
+                "s1.b": [2],
+                "val": [100],
+                "s2.c": [3],
+                "s2.d": [4],
+            }
+        )
+        assert_frame_equal(result, expected)
+
+
+    @pytest.mark.parametrize("frame_factory", [pl.DataFrame, pl.LazyFrame])
+    def test_struct_with_null_values(self, frame_factory):
+        """Test unnesting structs containing null values and fields."""
+        schema = pl.Schema(
+            {
+                "id": pl.Int64,
+                "info": pl.Struct([pl.Field("val", pl.Int64), pl.Field("text", pl.String)]),
+            }
+        )
+        df = frame_factory(
+            [
+                {"id": 1, "info": {"val": 10, "text": "hello"}},
+                {"id": 2, "info": None},
+                {"id": 3, "info": {"val": None, "text": "world"}},
+            ],
+            schema=schema,
+        )
+        result = unnest_structs(df)
+
+        if isinstance(result, pl.LazyFrame):
+            result = result.collect()
+
+        expected = pl.DataFrame(
+            [
+                {"id": 1, "info.val": 10, "info.text": "hello"},
+                {"id": 2, "info.val": None, "info.text": None},
+                {"id": 3, "info.val": None, "info.text": "world"},
+            ],
+            schema=pl.Schema(
+                {
+                    "id": pl.Int64,
+                    "info.val": pl.Int64,
+                    "info.text": pl.String,
+                }
+            ),
+        )
+        assert_frame_equal(result, expected)
+
+
+    def test_empty_struct_column(self):
+        """Test handling of empty struct columns (struct with no fields)."""
+        df = pl.DataFrame(
+            schema={
+                "id": pl.Int64,
+                "empty_st": pl.Struct([]),
+            }
+        )
+        result = unnest_structs(df)
+        expected = pl.DataFrame(
+            schema={
+                "id": pl.Int64,
+                "empty_st": pl.Struct([]),
+            }
+        )
+        assert_frame_equal(result, expected)
+
+
+    def test_returns_same_type(self):
+        """Test that input type (DataFrame vs LazyFrame) is preserved in return value."""
+        df = pl.DataFrame({"a": [1]})
+        lf = pl.LazyFrame({"a": [1]})
+
+        res_df = unnest_structs(df)
+        res_lf = unnest_structs(lf)
+
+        assert isinstance(res_df, pl.DataFrame)
+        assert isinstance(res_lf, pl.LazyFrame)
