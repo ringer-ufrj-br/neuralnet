@@ -47,16 +47,14 @@ type BinHighType = Annotated[
 
 type BinClosedType = Annotated[
     Literal["left", "right", "both", "none"],
-    Field(
-        description="Indicates whether the bin is closed on the left, right, both, or neither side."
-    ),
+    Field(description="Indicates whether the bin is closed on the left, right, both, or neither side."),
 ]
+
+BinClosedPolarsEnum = pl.Enum(["left", "right", "both", "none"])
 
 
 class VariableBin(BaseModel):
-    var_name: Annotated[
-        str, Field(description="Name of the variable used in the binning.")
-    ]
+    var_name: Annotated[str, Field(description="Name of the variable used in the binning.")]
     low: BinLowType
     high: BinHighType
     closed: BinClosedType
@@ -70,9 +68,7 @@ class VariableBin(BaseModel):
     @overload
     def apply_bin(self, df: "pl.LazyFrame") -> "pl.LazyFrame": ...
 
-    def is_inside_polars(
-        self, df: "pl.DataFrame | pl.LazyFrame"
-    ) -> "pl.DataFrame | pl.LazyFrame":
+    def is_inside_polars(self, df: "pl.DataFrame | pl.LazyFrame") -> "pl.DataFrame | pl.LazyFrame":
         return df.filter(self.as_polars_expr())
 
 
@@ -83,6 +79,13 @@ class Bin(BaseModel):
 
     def as_polars_expr(self, name: str) -> "pl.Expr":
         return pl.col(name).is_between(self.low, self.high, closed=self.closed)
+
+    def as_polars_struct(self) -> "pl.Expr":
+        return pl.struct(
+            low=pl.lit(self.low, dtype=pl.Float64),
+            high=pl.lit(self.high, dtype=pl.Float64),
+            closed=pl.lit(self.closed, dtype=BinClosedPolarsEnum),
+        )
 
     def sample(self, n_samples: int) -> Numpy1DFloatArray:
         """
@@ -136,11 +139,7 @@ class AbsoluteVariableBin(VariableBin):
     high: AbsoluteBinHighType
 
     def as_polars_expr(self) -> pl.Expr:
-        return (
-            pl.col(self.var_name)
-            .abs()
-            .is_between(self.low, self.high, closed=self.closed)
-        )
+        return pl.col(self.var_name).abs().is_between(self.low, self.high, closed=self.closed)
 
 
 class AbsoluteBin(Bin):

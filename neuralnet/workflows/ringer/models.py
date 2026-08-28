@@ -1,6 +1,6 @@
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, overload, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, overload, runtime_checkable, Annotated
 import logging
 
 import numpy as np
@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...bins import AbsoluteVariableBin, VariableBin
 from ...quantization.quantizers import FixedPointQuantizer
+from ...normalizers.factories import FixedPointAlternativeNormL1
 
 if TYPE_CHECKING:
     from keras import Sequential
@@ -579,6 +580,13 @@ class SpecialistBinConfig(BaseModel):
                 closed=self.closed,
             )
 
+type NormStrategyType = Annotated[
+    Literal["l1"] | FixedPointAlternativeNormL1 | None,
+    Field(
+        description="Normalization strategy to apply to the rings. If None, no normalization is applied. If 'l1', each ring is divided by the sum of all rings for that sample.",
+    ),
+]
+
 
 class SpecialistPreprocessingConfig(BaseModel):
     """Configuration schema for the specialist preprocessing pipeline."""
@@ -587,7 +595,7 @@ class SpecialistPreprocessingConfig(BaseModel):
 
     rings_col: str = Field(default="rings", description="Input rings column name.")
     ring_fraction: int = Field(default=2, gt=0, description="Fraction of rings retained per layer.")
-    norm_strategy: str | None = Field(default="l1", description="Normalization strategy name.")
+    norm_strategy: NormStrategyType
 
     def to_pipeline(self, rings_col: str | None = None) -> Tranformation:
         """Build the PreprocessingPipeline instance."""

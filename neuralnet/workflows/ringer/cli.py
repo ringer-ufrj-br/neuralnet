@@ -4,6 +4,7 @@ from pathlib import Path
 from ...pydantic import pydantic_to_markdown_schema
 from .training import RingerKerasTrainingJob
 from .threshold_fit import RingerCommitteeThresholdFitJob
+from .inference import RingerCommitteeInferenceJob
 from .alternative_norm1 import AlternativeNorm1Analysis
 
 
@@ -60,6 +61,35 @@ def threshold_fit(
     ],
 ):
     job = RingerCommitteeThresholdFitJob.from_yaml(config)
+    job.submit()
+
+
+RUN_INFERENCE_HELP = "Run Ringer Committee inference job"
+
+
+@app.command(
+    name="inference",
+    short_help=RUN_INFERENCE_HELP,
+    help=(
+        f"{RUN_INFERENCE_HELP}\n\n"
+        "This command runs full-dataset inference with a fitted Ringer Committee "
+        "and saves the results as a parquet table keyed by ``id`` for later joining "
+        "with other tables.  "
+        "The configuration is provided through a YAML file. "
+        "The YAML file should follow the schema bellow:\n\n"
+        f"{pydantic_to_markdown_schema(RingerCommitteeInferenceJob)}"
+    ),
+)
+def inference(
+    config: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            help="Path to the YAML configuration file for the inference job",
+        ),
+    ],
+):
+    job = RingerCommitteeInferenceJob.from_yaml(config)
     job.submit()
 
 

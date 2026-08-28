@@ -44,7 +44,7 @@ from ...models.keras.factories import (
     OptimizerType,
 )
 from ...models.binned_committee import VariableBin
-from .models import BinnedSpecialistCommittee, BinnedSpecialistModel
+from .models import BinnedSpecialistCommittee, BinnedSpecialistModel, NormStrategyType
 from .fields import RingFractionType
 from ...models.dense import (
     MLPFactory,
@@ -108,11 +108,9 @@ type FromLogitsType = Annotated[
     ),
 ]
 
-type NormStrategyType = Annotated[
-    Literal["l1"] | FixedPointAlternativeNormL1 | None,
-    Field(
-        description="Normalization strategy to apply to the rings. If None, no normalization is applied. If 'l1', each ring is divided by the sum of all rings for that sample.",
-    ),
+type ExecutorConfigType = Annotated[
+    ExecutorConfig,
+    Field(description="Slurm configuration for running the training job on a Slurm cluster"),
 ]
 
 
@@ -462,10 +460,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
 
     # Execution related fields
     dry_run: Annotated[bool, Field(description="Perform a dry run without actually training")] = False
-    executor_config: Annotated[
-        ExecutorConfig,
-        Field(description="Slurm configuration for running the training job on a Slurm cluster"),
-    ]
+    executor_config: ExecutorConfigType
     output_path: Annotated[
         Path, Field(description="Path to save the results of the job"), PlainSerializer(str, return_type=str)
     ]

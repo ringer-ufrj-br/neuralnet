@@ -15,9 +15,10 @@ the target true-positive rate (TPR).
 Outputs include per-member confusion matrix DataFrames (saved as parquet),
 a flat results table, committee-level aggregate metrics, and standalone
 operating-point JSON configuration files (e.g. ``tight.json``, ``medium.json``)
-alongside a ``models/`` directory with all member model weight files. Each
-operating-point JSON file contains everything needed to reconstruct the complete
-inference pipeline from scratch without relying on the training job directory.
+alongside a ``models/`` directory with per-member model files and evaluation
+outputs. Each operating-point JSON file contains everything needed to
+reconstruct the complete inference pipeline from scratch without relying on
+the training job directory.
 
 Output directory layout
 -----------------------
@@ -29,10 +30,14 @@ After :meth:`RingerCommitteeThresholdFitJob.submit` completes, the
     │   Job configuration dumped as JSON for reproducibility.
     │
     ├── models/
-    │   Directory containing all specialist member model files:
-    │     • member_0.keras, member_1.keras, ...
-    │   Each file contains the full Keras model architecture and trained
-    │   weights for that specific committee member.
+    │   Directory containing all specialist member directories:
+    │   └── member_{id}/
+    │       ├── model.keras
+    │       │   Full Keras model architecture and trained weights for this
+    │       │   committee member.
+    │       └── {dataset_type}_confusion_matrix.parquet
+    │           Confusion matrix DataFrame containing TPR, FPR, thresholds, and
+    │           counts for that dataset split. One file per entry in ``dataset_types``.
     │
     ├── {op_point}.json (e.g. tight.json, medium.json, ...)
     │   One standalone JSON file per reference operating point defined in
@@ -56,7 +61,7 @@ After :meth:`RingerCommitteeThresholdFitJob.submit` completes, the
     │               {
     │                   "id": 0,
     │                   "fold": 0,
-    │                   "model_path": "models/member_0.keras",
+    │                   "model_path": "models/member_0/model.keras",
     │                   "decision_threshold": 0.8523,
     │                   "bins": [
     │                       {
@@ -102,18 +107,11 @@ After :meth:`RingerCommitteeThresholdFitJob.submit` completes, the
     │                                   — confusion-matrix statistics at the
     │                                     fitted threshold for that split
     │
-    ├── committee_results.json
-    │   Committee-level aggregate metrics.  Confusion-matrix counts are
-    │   *summed* across all specialists for each (dataset_type, reference)
-    │   pair; derived rates (tpr, fpr, accuracy, sp) are then computed from
-    │   those totals.
-    │
-    └── member_{id}/
-        Per-specialist output directory (one per committee member).
-        │
-        └── {dataset_type}_confusion_matrix.parquet
-            Confusion matrix DataFrame containing TPR, FPR, thresholds, and
-            counts for that dataset split. One file per entry in ``dataset_types``.
+    └── committee_results.json
+        Committee-level aggregate metrics.  Confusion-matrix counts are
+        *summed* across all specialists for each (dataset_type, reference)
+        pair; derived rates (tpr, fpr, accuracy, sp) are then computed from
+        those totals.
 
 """
 
@@ -223,7 +221,8 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
 
     After :meth:`submit` completes the ``output_path`` directory holds all
     evaluation outputs, including:
-    - ``models/`` containing the model files for each specialist member.
+    - ``models/member_{id}/`` containing the member model (``model.keras``) and
+      confusion matrix parquet files for each dataset split.
     - ``{op_point}.json`` (e.g. ``tight.json``, ``medium.json``) containing all
       pipeline configs and decision thresholds for each operating point.
     - ``results.parquet`` with unnested member-level metrics.
@@ -425,8 +424,20 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
 
     @cached_property
     def models_dir(self) -> Path:
-        """Path to the directory containing all member model files."""
+        """Path to the directory containing all member model directories."""
         return self.output_path / "models"
+
+    def get_member_dir(self, member_id: int | str) -> Path:
+        """Path to the output directory for a specific specialist member."""
+        return self.models_dir / f"member_{member_id}"
+
+    def get_member_model_path(self, member_id: int | str) -> Path:
+        """Path to the Keras model file for a specific specialist member."""
+        return self.get_member_dir(member_id) / "model.keras"
+
+    def get_member_confusion_matrix_path(self, member_id: int | str, dataset_type: str) -> Path:
+        """Path to the confusion matrix parquet file for a specific member and split."""
+        return self.get_member_dir(member_id) / f"{dataset_type}_confusion_matrix.parquet"
 
     @cached_property
     def results_path(self) -> Path:
@@ -474,22 +485,24 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
         -----
         1. Persist the job configuration to ``config.json``.
         2. Load the training job and build the specialist committee.
-        3. Copy / export all specialist member model files into ``models/``.
-        4. For each specialist:
+        3. For each specialist:
 
-           a. Run inference on the evaluation dataset (``predict_df``).
-           b. For each dataset split filter the predictions by the
+           a. Create member directory at ``models/member_{id}/``.
+           b. Copy or export specialist member model to ``models/member_{id}/model.keras``.
+           c. Run inference on the evaluation dataset (``predict_df``).
+           d. For each dataset split filter the predictions by the
               corresponding ``is_{dataset_type}`` boolean column.
-           c. Compute the full confusion-matrix curve via
+           e. Compute the full confusion-matrix curve via
               :func:`~neuralnet.metrics.enhanced_confusion_matrix_from_polars`.
-           d. For each reference operating point, locate the threshold whose
+           f. Save the confusion matrix DataFrame to
+              ``models/member_{id}/{dataset_type}_confusion_matrix.parquet``.
+           g. For each reference operating point, locate the threshold whose
               empirical TPR is closest to the target TPR.
-           e. Save a ROC-curve plot highlighting all operating points.
 
-        5. Aggregate per-member results into ``results.parquet``.
-        6. Sum confusion-matrix counts across specialists and save
+        4. Aggregate per-member results into ``results.parquet``.
+        5. Sum confusion-matrix counts across specialists and save
            ``committee_results.json``.
-        7. For each reference operating point, export ``{op_point}.json``
+        6. For each reference operating point, export ``{op_point}.json``
            containing all preprocessing configurations, bin definitions,
            thresholds, and relative paths to the model files in ``models/``.
         """
@@ -522,11 +535,11 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
             eta_bin = specialist.training_results["eta_bin"]
             model_id = specialist.training_results["id"]
             fold = specialist.training_results["fold"]
-            member_dir = self.output_path / f"member_{model_id}"
+            member_dir = self.get_member_dir(model_id)
             member_dir.mkdir(parents=True, exist_ok=True)
 
-            # Export/copy specialist model to models/member_{id}.keras
-            member_model_file = self.models_dir / f"member_{model_id}.keras"
+            # Export/copy specialist model to models/member_{id}/model.keras
+            member_model_file = self.get_member_model_path(model_id)
             orig_model_path = training_job.get_member_model_path(model_id)
             if orig_model_path.exists():
                 shutil.copy2(orig_model_path, member_model_file)
@@ -611,7 +624,7 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
                 member_thresholds[dataset_type] = split_thresholds
 
                 # Save confusion matrix DataFrame for this member and dataset split.
-                cm_path = member_dir / f"{dataset_type}_confusion_matrix.parquet"
+                cm_path = self.get_member_confusion_matrix_path(model_id, dataset_type)
                 cm_df.write_parquet(cm_path)
                 logger.info(f"Saved confusion matrix DataFrame to {cm_path}.")
 
@@ -680,7 +693,7 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
                     {
                         "id": model_id,
                         "fold": specialist.training_results.get("fold"),
-                        "model_path": f"models/member_{model_id}.keras",
+                        "model_path": f"models/member_{model_id}/model.keras",
                         "decision_threshold": threshold_for_primary,
                         "bins": bins_data,
                         "preprocessing": prep_data,

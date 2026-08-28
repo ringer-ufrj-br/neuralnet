@@ -14,33 +14,19 @@ from .. import get_logger
 from ..bins import VariableBin, AbsoluteVariableBin, BinDict, Bin
 
 
-type DataTableType = Annotated[
-    str, Field(description="Name of the data table in the parquet dataset")
-]
+type DataTableType = Annotated[str, Field(description="Name of the data table in the parquet dataset")]
 
-type RingsColType = Annotated[
-    str, Field(description="Name of the rings column in the data table")
-]
+type RingsColType = Annotated[str, Field(description="Name of the rings column in the data table")]
 
-type KFoldTableType = Annotated[
-    str, Field(description="Name of the kfold table in the parquet dataset")
-]
+type KFoldTableType = Annotated[str, Field(description="Name of the kfold table in the parquet dataset")]
 
-type LabelColType = Annotated[
-    str, Field(description="Name of the label column in the kfold table")
-]
+type LabelColType = Annotated[str, Field(description="Name of the label column in the kfold table")]
 
-type FoldColType = Annotated[
-    str, Field(description="Name of the fold column in the kfold table")
-]
+type FoldColType = Annotated[str, Field(description="Name of the fold column in the kfold table")]
 
-type EtBinType = Annotated[
-    VariableBin | None, Field(description="Definition of the et bin")
-]
+type EtBinType = Annotated[VariableBin | None, Field(description="Definition of the et bin")]
 
-type EtaBinType = Annotated[
-    AbsoluteVariableBin | None, Field(description="Definition of the eta bin")
-]
+type EtaBinType = Annotated[AbsoluteVariableBin | None, Field(description="Definition of the eta bin")]
 
 type DataGroupType = Literal["train", "val", "test", "predict"]
 
@@ -70,9 +56,7 @@ class RingerParquetDataset(ParquetDataset):
     kfold_table: KFoldTableType
     label_col: LabelColType = "label"
     fold_col: FoldColType = "kfold"
-    fold: Annotated[
-        int, Field(description="Fold number to use for training.", ge=0)
-    ] = 0
+    fold: Annotated[int, Field(description="Fold number to use for training.", ge=0)] = 0
 
     et_bin: EtBinType = None
     eta_bin: EtaBinType = None
@@ -137,9 +121,7 @@ class RingerParquetDataset(ParquetDataset):
             case "predict":
                 pass
             case _:
-                raise ValueError(
-                    f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'."
-                )
+                raise ValueError(f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'.")
 
         data_df = self.get_dataframe(self.data_table)
         if self.et_bin is not None:
@@ -178,19 +160,9 @@ class RingerParquetDataset(ParquetDataset):
             case "predict":
                 df = self.predict_df()
             case _:
-                raise ValueError(
-                    f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'."
-                )
-        class_counts_df = (
-            df.select(self.label_col)
-            .group_by(self.label_col)
-            .len(name="count")
-            .collect()
-        )
-        class_counts = {
-            int(row[self.label_col]): row["count"]
-            for row in class_counts_df.iter_rows(named=True)
-        }
+                raise ValueError(f"Invalid group: {group}. Must be one of 'train', 'val', 'test', or 'predict'.")
+        class_counts_df = df.select(self.label_col).group_by(self.label_col).len(name="count").collect()
+        class_counts = {int(row[self.label_col]): row["count"] for row in class_counts_df.iter_rows(named=True)}
         logger = get_logger()
         for class_ in self.CLASSES:
             if class_ not in class_counts:
@@ -199,8 +171,7 @@ class RingerParquetDataset(ParquetDataset):
         total_samples = sum(class_counts.values())
         n_classes = len(self.CLASSES)
         class_weights = {
-            class_: total_samples / (n_classes * count) if count > 0 else 1.0
-            for class_, count in class_counts.items()
+            class_: total_samples / (n_classes * count) if count > 0 else 1.0 for class_, count in class_counts.items()
         }
         return class_weights
 
@@ -218,9 +189,7 @@ class RingerParquetDataset(ParquetDataset):
             Expression that produces a ``sample_weight`` column.
         """
         class_weights = self.get_class_weights(group)
-        weights_expr = pl.col(self.label_col).cast(pl.Float64).replace(class_weights).alias(
-            "sample_weight"
-        )
+        weights_expr = pl.col(self.label_col).cast(pl.Float64).replace(class_weights).alias("sample_weight")
         return weights_expr
 
     def get_sample_weights(self, group: DataGroupType) -> pl.LazyFrame:
@@ -316,11 +285,12 @@ def generate_ringer_dataset_dfs(
         A pair containing the data table and the k-fold table, respectively.
     """
     from sklearn.datasets import make_blobs
+
     for i in range(len(et_bins)):
         et_bins[i] = et_bins[i] if isinstance(et_bins[i], Bin) else Bin(**et_bins[i])
     for i in range(len(eta_bins)):
         eta_bins[i] = eta_bins[i] if isinstance(eta_bins[i], Bin) else Bin(**eta_bins[i])
-    
+
     final_data_df = []
     final_kfold_df = []
     id_starts = range(0, samples_per_bin * len(et_bins) * len(eta_bins), samples_per_bin)
@@ -329,7 +299,6 @@ def generate_ringer_dataset_dfs(
         product(et_bins, eta_bins),
     )
     for id_start, (et_bin, eta_bin) in iterator:
-
         rings, labels = make_blobs(
             n_samples=samples_per_bin,
             n_features=RingerParquetDataset.N_RINGS,
@@ -357,7 +326,7 @@ def generate_ringer_dataset_dfs(
             }
         )
         final_kfold_df.append(kfold_df)
-    
+
     final_kfold_df = pl.concat(final_kfold_df)
     final_data_df = pl.concat(final_data_df)
 

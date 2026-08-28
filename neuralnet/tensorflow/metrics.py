@@ -2,8 +2,6 @@
 from tensorflow import keras
 import tensorflow as tf
 
-tf.executing_eagerly()
-
 
 def auc(y_true, y_pred, num_thresholds=2000):
     import tensorflow as tf
@@ -29,22 +27,14 @@ class categorical_sp(keras.metrics.AUC):
         tf.config.run_functions_eagerly(True)
 
     def result(self):
-        fa: tf.Tensor = self.false_positives / (
-            self.true_negatives + self.false_positives + keras.backend.epsilon()
-        )
-        pd: tf.Tensor = self.true_positives / (
-            self.true_positives + self.false_negatives + keras.backend.epsilon()
-        )
+        fa: tf.Tensor = self.false_positives / (self.true_negatives + self.false_positives + keras.backend.epsilon())
+        pd: tf.Tensor = self.true_positives / (self.true_positives + self.false_negatives + keras.backend.epsilon())
         sp: tf.Tensor = tf.norm(
-            keras.backend.sqrt(
-                keras.backend.sqrt(pd * (1 - fa)) * (0.5 * (pd + (1 - fa)))
-            ),
+            keras.backend.sqrt(keras.backend.sqrt(pd * (1 - fa)) * (0.5 * (pd + (1 - fa)))),
             axis=1,
         )
         knee = keras.backend.argmax(sp)
-        return sp[knee] / keras.backend.sqrt(
-            keras.backend.variable(value=self._num_labels)
-        )
+        return sp[knee] / keras.backend.sqrt(keras.backend.variable(value=self._num_labels))
 
 
 class sp(keras.metrics.AUC):
@@ -54,16 +44,10 @@ class sp(keras.metrics.AUC):
     def result(self):
 
         # Add keras.backend.epsilon() for forbiding division by zero
-        fa = self.false_positives / (
-            self.true_negatives + self.false_positives + keras.backend.epsilon()
-        )
-        pd = self.true_positives / (
-            self.true_positives + self.false_negatives + keras.backend.epsilon()
-        )
+        fa = self.false_positives / (self.true_negatives + self.false_positives + keras.backend.epsilon())
+        pd = self.true_positives / (self.true_positives + self.false_negatives + keras.backend.epsilon())
 
-        sp = keras.backend.sqrt(
-            keras.backend.sqrt(pd * (1 - fa)) * (0.5 * (pd + (1 - fa)))
-        )
+        sp = keras.backend.sqrt(keras.backend.sqrt(pd * (1 - fa)) * (0.5 * (pd + (1 - fa))))
         knee = keras.backend.argmax(sp)
         return sp[knee]
 
@@ -75,16 +59,10 @@ class pd(keras.metrics.AUC):
     def result(self):
 
         # Add keras.backend.epsilon() for forbiding division by zero
-        fa = self.false_positives / (
-            self.true_negatives + self.false_positives + keras.backend.epsilon()
-        )
-        pd = self.true_positives / (
-            self.true_positives + self.false_negatives + keras.backend.epsilon()
-        )
+        fa = self.false_positives / (self.true_negatives + self.false_positives + keras.backend.epsilon())
+        pd = self.true_positives / (self.true_positives + self.false_negatives + keras.backend.epsilon())
 
-        sp = keras.backend.sqrt(
-            keras.backend.sqrt(pd * (1 - fa)) * (0.5 * (pd + (1 - fa)))
-        )
+        sp = keras.backend.sqrt(keras.backend.sqrt(pd * (1 - fa)) * (0.5 * (pd + (1 - fa))))
         knee = keras.backend.argmax(sp)
         return pd[knee]
 
@@ -96,16 +74,10 @@ class fa(keras.metrics.AUC):
     def result(self):
 
         # Add keras.backend.epsilon() for forbiding division by zero
-        fa = self.false_positives / (
-            self.true_negatives + self.false_positives + keras.backend.epsilon()
-        )
-        pd = self.true_positives / (
-            self.true_positives + self.false_negatives + keras.backend.epsilon()
-        )
+        fa = self.false_positives / (self.true_negatives + self.false_positives + keras.backend.epsilon())
+        pd = self.true_positives / (self.true_positives + self.false_negatives + keras.backend.epsilon())
 
-        sp = keras.backend.sqrt(
-            keras.backend.sqrt(pd * (1 - fa)) * (0.5 * (pd + (1 - fa)))
-        )
+        sp = keras.backend.sqrt(keras.backend.sqrt(pd * (1 - fa)) * (0.5 * (pd + (1 - fa))))
         knee = keras.backend.argmax(sp)
         return fa[knee]
 
