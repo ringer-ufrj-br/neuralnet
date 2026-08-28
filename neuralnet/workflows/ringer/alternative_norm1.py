@@ -8,6 +8,7 @@ quantized normalized rings across a configurable grid of integer and
 fractional bit widths.
 """
 
+from functools import cached_property
 import json
 from pathlib import Path
 from itertools import product
@@ -33,6 +34,7 @@ from .fields import RingFractionType
 from ...utils.polars import RingSlicesPerLayer
 from ...normalizers.polars import AlternativeNorm1
 from ... import get_logger
+from .training import EtColType, EtaColType, EtBinType, EtaBinType, ExecutorConfigType
 
 
 RESULTS_COL_DESCRIPTIONS: dict[str, str] = {
@@ -141,7 +143,7 @@ def compute_norm_metrics(
     quant_cols: list[str],
     eps: float = 1e-12,
     hist_bins: int = 100,
-) -> tuple[dict[str, float], pl.DataFrame]:
+) -> tuple[pl.LazyFrame, pl.LazyFrame]:
     """Compute error and distribution distance metrics using Polars expressions.
 
     Parameters
@@ -159,14 +161,15 @@ def compute_norm_metrics(
 
     Returns
     -------
-    tuple[dict[str, float], pl.DataFrame]
+    tuple[pl.LazyFrame, pl.LazyFrame]
         A tuple consisting of:
-        - Dictionary with aggregated metrics: mse, rmse, mae, mape, max_error, kl_divergence, and hist_kl_divergence.
-        - DataFrame containing sample-wise differences, absolute differences, squared differences,
+        - LazyFrame with one row containing aggregated metrics: mse, rmse, mae, mape, max_error, kl_divergence, and hist_kl_divergence.
+        - LazyFrame containing sample-wise differences, absolute differences, squared differences,
           relative differences, and sample-level summary metrics.
     """
     n_features = len(norm_cols)
-    schema = df.collect_schema() if isinstance(df, pl.LazyFrame) else df.schema
+    df_lazy = df.lazy() if isinstance(df, pl.DataFrame) else df
+    schema = df_lazy.collect_schema()
 
     diff_exprs = [(pl.col(c) - pl.col(qc)).alias(f"{c}.diff") for c, qc in zip(norm_cols, quant_cols)]
     abs_diff_exprs = [(pl.col(c) - pl.col(qc)).abs().alias(f"{c}.abs_diff") for c, qc in zip(norm_cols, quant_cols)]
@@ -187,23 +190,24 @@ def compute_norm_metrics(
     ]
 
     # Sample-wise KL divergence: discrete spatial distribution across rings per event
-    p_raw = [pl.when(pl.col(c) > 0).then(pl.col(c)).otherwise(0.0) + eps for c in norm_cols]
-    q_raw = [pl.when(pl.col(qc) > 0).then(pl.col(qc)).otherwise(0.0) + eps for qc in quant_cols]
-    p_sum = pl.sum_horizontal(*p_raw)
-    q_sum = pl.sum_horizontal(*q_raw)
-    kl_terms = [(p_k / p_sum) * ((p_k / p_sum) / (q_k / q_sum)).log() for p_k, q_k in zip(p_raw, q_raw)]
+    # p_raw = [pl.when(pl.col(c) > 0).then(pl.col(c)).otherwise(0.0) + eps for c in norm_cols]
+    # q_raw = [pl.when(pl.col(qc) > 0).then(pl.col(qc)).otherwise(0.0) + eps for qc in quant_cols]
+    # p_sum = pl.sum_horizontal(*p_raw)
+    # q_sum = pl.sum_horizontal(*q_raw)
+    # kl_terms = [(p_k / p_sum) * ((p_k / p_sum) / (q_k / q_sum)).log() for p_k, q_k in zip(p_raw, q_raw)]
 
     sample_summary_exprs = [
         pl.sum_horizontal(*raw_sq_diffs).truediv(n_features).alias("sample_mse"),
         pl.sum_horizontal(*raw_abs_diffs).truediv(n_features).alias("sample_mae"),
         pl.sum_horizontal(*raw_rel_diffs).truediv(n_features).alias("sample_mape"),
         pl.max_horizontal(*raw_abs_diffs).alias("sample_max_error"),
-        pl.sum_horizontal(*kl_terms).alias("sample_kl_divergence"),
+        # pl.sum_horizontal(*kl_terms).alias("sample_kl_divergence"),
     ]
 
     id_exprs = [pl.col("id")] if "id" in schema else []
 
-    sample_diffs_df = df.select(
+    sample_diffs_df = df_lazy.select(
+        "id",
         *id_exprs,
         *sample_summary_exprs,
         *diff_exprs,
@@ -211,41 +215,51 @@ def compute_norm_metrics(
         *diff_sq_exprs,
         *rel_diff_exprs,
     )
-    if isinstance(sample_diffs_df, pl.LazyFrame):
-        sample_diffs_df = sample_diffs_df.collect()
 
-    mse_val = float(sample_diffs_df["sample_mse"].mean())
-    res = {
-        "mse": mse_val,
-        "rmse": float(np.sqrt(mse_val)),
-        "mae": float(sample_diffs_df["sample_mae"].mean()),
-        "mape": float(sample_diffs_df["sample_mape"].mean()),
-        "max_error": float(sample_diffs_df["sample_max_error"].max()),
-        "kl_divergence": float(sample_diffs_df["sample_kl_divergence"].mean()),
-    }
+    # bin_edges = np.linspace(0.0, 1.0, hist_bins + 1)
+    # p_counts = []
+    # q_counts = []
+    # for i in range(hist_bins):
+    #     low, high = float(bin_edges[i]), float(bin_edges[i + 1])
+    #     if i == hist_bins - 1:
+    #         p_c = pl.sum_horizontal(
+    #             [pl.when((pl.col(c) >= low) & (pl.col(c) <= high)).then(1.0).otherwise(0.0) for c in norm_cols]
+    #         ).sum()
+    #         q_c = pl.sum_horizontal(
+    #             [pl.when((pl.col(c) >= low) & (pl.col(c) <= high)).then(1.0).otherwise(0.0) for c in quant_cols]
+    #         ).sum()
+    #     else:
+    #         p_c = pl.sum_horizontal(
+    #             [pl.when((pl.col(c) >= low) & (pl.col(c) < high)).then(1.0).otherwise(0.0) for c in norm_cols]
+    #         ).sum()
+    #         q_c = pl.sum_horizontal(
+    #             [pl.when((pl.col(c) >= low) & (pl.col(c) < high)).then(1.0).otherwise(0.0) for c in quant_cols]
+    #         ).sum()
+    #     p_counts.append(p_c)
+    #     q_counts.append(q_c)
 
-    # Histogram KL divergence on pooled values
-    norm_vals = df.select(norm_cols)
-    quant_vals = df.select(quant_cols)
-    if isinstance(norm_vals, pl.LazyFrame):
-        norm_vals = norm_vals.collect()
-        quant_vals = quant_vals.collect()
+    # p_sum_expr = pl.sum_horizontal(*[c + eps for c in p_counts])
+    # q_sum_expr = pl.sum_horizontal(*[c + eps for c in q_counts])
 
-    y_true_flat = norm_vals.to_numpy().flatten()
-    y_quant_flat = quant_vals.to_numpy().flatten()
+    # kl_bin_terms = []
+    # for pc, qc in zip(p_counts, q_counts):
+    #     p_d = (pc + eps) / p_sum_expr
+    #     q_d = (qc + eps) / q_sum_expr
+    #     kl_bin_terms.append(p_d * (p_d / q_d).log())
 
-    min_val = min(float(np.min(y_true_flat)), float(np.min(y_quant_flat)), 0.0)
-    max_val = max(float(np.max(y_true_flat)), float(np.max(y_quant_flat)), 1.0)
-    hist_range = (min_val, max_val)
+    # hist_kl_expr = pl.sum_horizontal(*kl_bin_terms).alias("hist_kl_divergence")
 
-    p_hist, bin_edges = np.histogram(y_true_flat, bins=hist_bins, range=hist_range, density=False)
-    q_hist, _ = np.histogram(y_quant_flat, bins=bin_edges, density=False)
+    metrics_df = df_lazy.select(
+        pl.sum_horizontal(*raw_sq_diffs).truediv(n_features).mean().alias("mse"),
+        pl.sum_horizontal(*raw_sq_diffs).truediv(n_features).mean().sqrt().alias("rmse"),
+        pl.sum_horizontal(*raw_abs_diffs).truediv(n_features).mean().alias("mae"),
+        pl.sum_horizontal(*raw_rel_diffs).truediv(n_features).mean().alias("mape"),
+        pl.max_horizontal(*raw_abs_diffs).max().alias("max_error"),
+        # pl.sum_horizontal(*kl_terms).mean().alias("kl_divergence"),
+        # hist_kl_expr,
+    )
 
-    p_dist = (p_hist.astype(np.float64) + eps) / np.sum(p_hist.astype(np.float64) + eps)
-    q_dist = (q_hist.astype(np.float64) + eps) / np.sum(q_hist.astype(np.float64) + eps)
-    res["hist_kl_divergence"] = float(np.sum(p_dist * np.log(p_dist / q_dist)))
-
-    return res, sample_diffs_df
+    return metrics_df, sample_diffs_df
 
 
 class AlternativeNorm1Analysis(YamlBaseModel):
@@ -268,16 +282,10 @@ class AlternativeNorm1Analysis(YamlBaseModel):
     kfold_table: KFoldTableType | None = None
     label_col: LabelColType = "label"
     fold_col: FoldColType = "kfold"
-    fold: Annotated[
-        int | None,
-        Field(description="Fold index to filter by if kfold_table is provided.", ge=0),
-    ] = None
-    data_group: Annotated[
-        DataGroupType | None,
-        Field(description="Dataset split ('train', 'val', 'test', 'predict') if kfold_table is used."),
-    ] = None
-    et_bin: EtBinType = None
-    eta_bin: EtaBinType = None
+    et_col: EtColType = "et"
+    eta_col: EtaColType = "eta"
+    et_bins: EtBinType | None = None
+    eta_bins: EtaBinType | None = None
 
     # Quantization bit ranges
     integer_bits_range: Annotated[
@@ -293,13 +301,14 @@ class AlternativeNorm1Analysis(YamlBaseModel):
     eps: Annotated[float, Field(gt=0, description="Epsilon for numerical stability.")] = 1e-12
     hist_bins: Annotated[int, Field(gt=0, description="Number of histogram bins for value distribution KL.")] = 100
 
-    # Output path (Directory containing results.csv, config.json, differences/, and README.md)
+    # Execution related fields
     output_path: Annotated[
-        Path | None,
+        Path,
         Field(
             description="Directory path to save results.csv, config.json, README.md, and sample-wise differences parquet files."
         ),
-    ] = None
+    ]
+    # executor_config: ExecutorConfigType
 
     def get_data(self) -> pl.LazyFrame:
         """Load and filter the dataset as a LazyFrame.
@@ -309,40 +318,20 @@ class AlternativeNorm1Analysis(YamlBaseModel):
         pl.LazyFrame
             LazyFrame containing data matching configuration filters.
         """
-        if self.kfold_table is not None and self.data_group is not None:
-            ringer_dataset = RingerParquetDataset(
-                dataset_dir=self.dataset_dir,
-                data_table=self.data_table,
-                kfold_table=self.kfold_table,
-                rings_col=self.rings_col,
-                label_col=self.label_col,
-                fold_col=self.fold_col,
-                fold=self.fold if self.fold is not None else 0,
-                et_bin=self.et_bin,
-                eta_bin=self.eta_bin,
-            )
-            return ringer_dataset.get_fold_data(self.data_group)
 
         dataset = ParquetDataset(dataset_dir=self.dataset_dir)
         df = dataset.get_dataframe(self.data_table)
 
         if self.kfold_table is not None:
             kfold_df = dataset.get_dataframe(self.kfold_table)
-            df = df.join(kfold_df, on="id", how="inner")
-            if self.fold is not None:
-                df = df.filter(pl.col(self.fold_col) == self.fold)
-
-        if self.et_bin is not None:
-            df = df.pipe(self.et_bin.is_inside_polars)
-        if self.eta_bin is not None:
-            df = df.pipe(self.eta_bin.is_inside_polars)
+            df = df.join(kfold_df, on="id", how="left")
 
         return df
 
     def generate_readme_content(
         self,
-        results_df: pl.DataFrame | None = None,
-        sample_diffs_df: pl.DataFrame | None = None,
+        results_df: pl.DataFrame | pl.LazyFrame | None = None,
+        sample_diffs_df: pl.DataFrame | pl.LazyFrame | None = None,
         n_samples: int | None = None,
         n_features: int | None = None,
     ) -> str:
@@ -350,10 +339,10 @@ class AlternativeNorm1Analysis(YamlBaseModel):
 
         Parameters
         ----------
-        results_df : pl.DataFrame | None, optional
+        results_df : pl.DataFrame | pl.LazyFrame | None, optional
             Aggregated results DataFrame with schema.
-        sample_diffs_df : pl.DataFrame | None, optional
-            Sample differences DataFrame with schema.
+        sample_diffs_df : pl.DataFrame | pl.LazyFrame | None, optional
+            Sample differences DataFrame or LazyFrame with schema.
         n_samples : int | None, optional
             Number of evaluated samples.
         n_features : int | None, optional
@@ -382,7 +371,8 @@ class AlternativeNorm1Analysis(YamlBaseModel):
 
         # Generate schema markdown tables
         if results_df is not None:
-            results_schema_md = format_dataframe_schema_markdown(results_df.schema, RESULTS_COL_DESCRIPTIONS)
+            results_schema = results_df.collect_schema() if isinstance(results_df, pl.LazyFrame) else results_df.schema
+            results_schema_md = format_dataframe_schema_markdown(results_schema, RESULTS_COL_DESCRIPTIONS)
         else:
             default_results_schema = pl.Schema(
                 {
@@ -394,14 +384,19 @@ class AlternativeNorm1Analysis(YamlBaseModel):
                     "mae": pl.Float64,
                     "mape": pl.Float64,
                     "max_error": pl.Float64,
-                    "kl_divergence": pl.Float64,
-                    "hist_kl_divergence": pl.Float64,
+                    # "kl_divergence": pl.Float64,
+                    # "hist_kl_divergence": pl.Float64,
                 }
             )
             results_schema_md = format_dataframe_schema_markdown(default_results_schema, RESULTS_COL_DESCRIPTIONS)
 
         if sample_diffs_df is not None:
-            sample_diffs_schema_md = format_dataframe_schema_markdown(sample_diffs_df.schema)
+            sample_schema = (
+                sample_diffs_df.collect_schema()
+                if isinstance(sample_diffs_df, pl.LazyFrame)
+                else sample_diffs_df.schema
+            )
+            sample_diffs_schema_md = format_dataframe_schema_markdown(sample_schema)
         else:
             sample_diffs_schema_md = "| Column Name | Data Type | Description |\n| :--- | :--- | :--- |\n| `id` | `Int64` | Event / sample ID |\n| `sample_mse` | `Float64` | Event-level Mean Squared Error across rings |\n| `sample_mae` | `Float64` | Event-level Mean Absolute Error across rings |\n| `sample_mape` | `Float64` | Event-level Mean Absolute Percentage Error in relation to floating-point rings |\n| `sample_max_error` | `Float64` | Event-level Maximum Absolute Error across rings |\n| `sample_kl_divergence` | `Float64` | Event-level discrete spatial energy distribution KL divergence ($D_{\\text{KL}}(P_i \\parallel Q_i)$) |\n| `<col_name>.diff` | `Float64` | Signed difference ($y - \\hat{y}$) |\n| `<col_name>.abs_diff` | `Float64` | Absolute difference ($|y - \\hat{y}|$) |\n| `<col_name>.sq_diff` | `Float64` | Squared difference ($(y - \\hat{y})^2$) |\n| `<col_name>.rel_diff` | `Float64` | Relative difference in relation to floating-point normalization ($\\frac{|y - \\hat{y}|}{|y|}$) |"
 
@@ -477,7 +472,7 @@ results_df = analysis.results.collect()
 print(results_df)
 
 # 3. Retrieve sample-wise differences for a specific configuration (e.g., {first_ib} integer bit, {first_fb} fractional bits)
-diff_df = analysis.get_diff_df(integer_bits={first_ib}, fractional_bits={first_fb}).collect()
+diff_df = analysis.get_quantized_df(integer_bits={first_ib}, fractional_bits={first_fb}).collect()
 print(diff_df)
 ```
 
@@ -515,7 +510,7 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
         sliced_df = data_df.pipe(ring_selector, passthrough=True)
 
         normalizer = AlternativeNorm1(input_cols=ring_selector.output_cols)
-        norm_df = sliced_df.pipe(normalizer, passthrough=True).collect().lazy()
+        norm_df = sliced_df.pipe(normalizer, passthrough=True)
 
         norm_cols = normalizer.output_cols
         n_features = len(norm_cols)
@@ -524,47 +519,74 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
         int_bits_list = self.integer_bits_range.as_list()
         frac_bits_list = self.fractional_bits_range.as_list()
 
-        if self.output_path is not None:
-            output_dir = Path(self.output_path)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            differences_dir = output_dir / "differences"
-            differences_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = Path(self.output_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self.quantized_dir.mkdir(parents=True, exist_ok=True)
 
-        records = []
-        n_samples = None
-        last_sample_diffs_df = None
+        output_columns = {"id"} | set(normalizer.output_cols)
+        # if self.kfold_col:
+        #     output_columns.add(self.kfold_col)
+        if self.et_col:
+            output_columns.add(self.et_col)
+        if self.eta_col:
+            output_columns.add(self.eta_col)
+        if self.label_col:
+            output_columns.add(self.label_col)
+
+        all_metric_dfs = []
         for ib, fb in product(int_bits_list, frac_bits_list):
             logger.info(f"Computing quantization for {ib} integer bits and {fb} fractional bits...")
             quantized_normalizer = normalizer.fixed_point_quantization(
                 {"fractional_bits": fb, "integer_bits": ib}
             ).model_copy(update={"input_cols": ring_selector.output_cols, "suffix": "quantized_alternative_norm1"})
             quantized_df = norm_df.pipe(quantized_normalizer, passthrough=True)
+            iteration_output_columns = output_columns | set(quantized_normalizer.output_cols)
 
-            metrics, sample_diffs_df = compute_norm_metrics(
-                df=quantized_df,
-                norm_cols=norm_cols,
-                quant_cols=quantized_normalizer.output_cols,
-                eps=self.eps,
-                hist_bins=self.hist_bins,
-            )
+            quantized_df = quantized_df.select(*iteration_output_columns)
+            quantized_path = str(self.get_quantized_df_path(ib, fb))
+            quantized_df.sink_parquet(quantized_path)
+            quantized_df = pl.scan_parquet(quantized_path)
 
-            last_sample_diffs_df = sample_diffs_df
-            if n_samples is None:
-                n_samples = sample_diffs_df.height
+            quantized_metric_dfs = []
 
-            if self.output_path is not None:
-                diff_file = differences_dir / f"differences_ib_{ib}_fb_{fb}.parquet"
-                sample_diffs_df.write_parquet(diff_file)
+            for et_bin, eta_bin in product(self.et_bins, self.eta_bins):
+                binned_df = quantized_df.filter(
+                    et_bin.as_polars_expr(self.et_col) & eta_bin.as_polars_expr(self.eta_col)
+                )
+                metrics_lf, _ = compute_norm_metrics(
+                    df=binned_df,
+                    norm_cols=norm_cols,
+                    quant_cols=quantized_normalizer.output_cols,
+                    eps=self.eps,
+                    hist_bins=self.hist_bins,
+                )
 
-            record = {
-                "integer_bits": ib,
-                "fractional_bits": fb,
-                "total_bits": ib + fb,
-                **metrics,
-            }
-            records.append(record)
+                cfg_metrics_lf = metrics_lf.with_columns(
+                    pl.lit(ib).alias("integer_bits"),
+                    pl.lit(fb).alias("fractional_bits"),
+                    et_bin.as_polars_struct().alias("et_bin"),
+                    eta_bin.as_polars_struct().alias("eta_bin"),
+                ).select(
+                    "integer_bits",
+                    "fractional_bits",
+                    # "data_group",
+                    "et_bin",
+                    "eta_bin",
+                    "mse",
+                    "rmse",
+                    "mae",
+                    "mape",
+                    "max_error",
+                    # "kl_divergence",
+                    # "hist_kl_divergence",
+                )
+                quantized_metric_dfs.append(cfg_metrics_lf)
 
-        results_df = pl.DataFrame(records)
+            logger.info(f"Aggregating and collecting metrics for IB {ib} and FB {fb}...")
+            all_metric_dfs.append(pl.concat(quantized_metric_dfs).collect())
+
+        logger.info("Collecting results_table")
+        results_df = pl.concat(all_metric_dfs)
 
         if self.output_path is not None:
             output_dir = Path(self.output_path)
@@ -572,14 +594,28 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
             output_dir.joinpath("config.json").write_text(self.model_dump_json(indent=4))
             readme_content = self.generate_readme_content(
                 results_df=results_df,
-                sample_diffs_df=last_sample_diffs_df,
-                n_samples=n_samples,
+                sample_diffs_df=quantized_df,
+                n_samples=quantized_df.select(pl.len()).collect().item(),
                 n_features=n_features,
             )
             output_dir.joinpath("README.md").write_text(readme_content)
             logger.info(f"Saved aggregated results, sample differences, config.json, and README.md to {output_dir}")
 
         return results_df
+
+    def compute_for_bits(self, integer_bits: int, fractional_bits: int):
+        logger = get_logger()
+        logger.info(f"Computing quantization for {integer_bits} integer bits and {fractional_bits} fractional bits...")
+        quantized_normalizer = normalizer.fixed_point_quantization(
+            {"fractional_bits": fractional_bits, "integer_bits": integer_bits}
+        ).model_copy(update={"input_cols": ring_selector.output_cols, "suffix": "quantized_alternative_norm1"})
+        quantized_df = norm_df.pipe(quantized_normalizer, passthrough=True)
+        iteration_output_columns = output_columns | set(quantized_normalizer.output_cols)
+
+        quantized_df = quantized_df.select(*iteration_output_columns)
+        quantized_path = str(self.get_quantized_df_path(integer_bits, integer_bits))
+        quantized_df.sink_parquet(quantized_path)
+        quantized_df = pl.scan_parquet(quantized_path)
 
     @classmethod
     def load(cls, path: Path | str) -> Self:
@@ -604,6 +640,31 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
         instance = cls(**config)
         return instance
 
+    @cached_property
+    def quantized_dir(self) -> Path:
+        return Path(self.output_path) / "quantized"
+
+    def get_quantized_df_path(
+        self,
+        integer_bits: int,
+        fractional_bits: int,
+    ) -> Path:
+        """Get the path to the sample-wise differences parquet file for a specific bit configuration.
+
+        Parameters
+        ----------
+        integer_bits : int
+            Number of integer bits.
+        fractional_bits : int
+            Number of fractional bits.
+
+        Returns
+        -------
+        Path
+            Path to the corresponding differences parquet file.
+        """
+        return self.quantized_dir / f"quantized_ib_{integer_bits:04d}_fb_{fractional_bits:04d}.parquet"
+
     @staticmethod
     def validate_saved_directory(output_path: Path | str) -> None:
         """Validate that an output directory exists and contains expected files.
@@ -623,6 +684,9 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
         if not (output_path / "results.csv").exists():
             raise FileNotFoundError(f"Results file 'results.csv' not found in '{output_path}'.")
 
+    def get_intermediate_results_path(self, integer_bits: int, floating_bits: int):
+        return self.quantized_dir / f"results_ib_{integer_bits:04d}_fb_{floating_bits:04d}.csv"
+
     @property
     def results(self) -> pl.LazyFrame:
         """Return a Polars LazyFrame of the aggregated quantization results from results.csv.
@@ -639,7 +703,7 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
             raise FileNotFoundError(f"Results file not found at '{results_path}'.")
         return pl.scan_csv(results_path)
 
-    def get_diff_df(
+    def get_quantized_df(
         self,
         integer_bits: int,
         fractional_bits: int,
@@ -658,11 +722,7 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
         pl.LazyFrame
             LazyFrame reading the corresponding differences parquet file.
         """
-        if self.output_path is None:
-            raise ValueError("output_path is not set for this analysis.")
-        diff_path = (
-            Path(self.output_path) / "differences" / f"differences_ib_{integer_bits}_fb_{fractional_bits}.parquet"
-        )
+        diff_path = self.get_quantized_df_path(integer_bits, fractional_bits)
         if not diff_path.exists():
             raise FileNotFoundError(f"Differences file not found at '{diff_path}'.")
         return pl.scan_parquet(diff_path)
