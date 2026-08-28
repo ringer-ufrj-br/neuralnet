@@ -36,15 +36,22 @@ def test_compute_norm_metrics_perfect_match():
         df_data[cq] = y[:, i]
 
     df = pl.DataFrame(df_data)
-    metrics, diffs_df = compute_norm_metrics(df, norm_cols=cols_norm, quant_cols=cols_quant)
+    metrics_lf, diffs_lf = compute_norm_metrics(df, norm_cols=cols_norm, quant_cols=cols_quant)
 
-    assert metrics["mse"] == 0.0
-    assert metrics["rmse"] == 0.0
-    assert metrics["mae"] == 0.0
-    assert metrics["mape"] == 0.0
-    assert metrics["max_error"] == 0.0
-    assert abs(metrics["kl_divergence"]) < 1e-6
-    assert abs(metrics["hist_kl_divergence"]) < 1e-6
+    assert isinstance(metrics_lf, pl.LazyFrame)
+    assert isinstance(diffs_lf, pl.LazyFrame)
+
+    metrics_df = metrics_lf.collect()
+    diffs_df = diffs_lf.collect()
+
+    assert metrics_df.height == 1
+    assert metrics_df["mse"][0] == 0.0
+    assert metrics_df["rmse"][0] == 0.0
+    assert metrics_df["mae"][0] == 0.0
+    assert metrics_df["mape"][0] == 0.0
+    assert metrics_df["max_error"][0] == 0.0
+    assert abs(metrics_df["kl_divergence"][0]) < 1e-6
+    assert abs(metrics_df["hist_kl_divergence"][0]) < 1e-6
 
     assert isinstance(diffs_df, pl.DataFrame)
     assert diffs_df.height == n_samples
@@ -55,6 +62,11 @@ def test_compute_norm_metrics_perfect_match():
     assert f"{cols_norm[0]}.abs_diff" in diffs_df.columns
     assert f"{cols_norm[0]}.sq_diff" in diffs_df.columns
     assert f"{cols_norm[0]}.rel_diff" in diffs_df.columns
+
+    # Test that calling with LazyFrame also returns LazyFrames without early collection
+    metrics_lf2, diffs_lf2 = compute_norm_metrics(df.lazy(), norm_cols=cols_norm, quant_cols=cols_quant)
+    assert isinstance(metrics_lf2, pl.LazyFrame)
+    assert isinstance(diffs_lf2, pl.LazyFrame)
 
 
 def test_alternative_norm1_analysis_submit(tmp_path: Path):

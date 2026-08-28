@@ -343,12 +343,15 @@ def threshold_fit_job_test_routine(
                 f"Expected key '{key}' missing from committee_results.json"
             )
 
-    # Each member directory must contain confusion matrix parquet files.
-    member_dirs = list(evaluation_output.glob("member_*"))
+    # Each member directory inside models/ must contain model.keras and confusion matrix parquet files.
+    assert eval_job.models_dir.exists(), f"models directory not found at {eval_job.models_dir}"
+    member_dirs = list(eval_job.models_dir.glob("member_*"))
     assert len(member_dirs) == n_selected, (
-        f"Expected {n_selected} member directories, found {len(member_dirs)}"
+        f"Expected {n_selected} member directories in {eval_job.models_dir}, found {len(member_dirs)}"
     )
     for member_dir in member_dirs:
+        model_file = member_dir / "model.keras"
+        assert model_file.exists(), f"Model file missing: {model_file}"
         for dataset_type in eval_job.dataset_types:
             cm_path = member_dir / f"{dataset_type}_confusion_matrix.parquet"
             assert cm_path.exists(), (
@@ -359,14 +362,6 @@ def threshold_fit_job_test_routine(
             assert "tpr" in cm_df.columns
             assert "fpr" in cm_df.columns
             assert "threshold" in cm_df.columns
-
-
-    # models/ directory must exist and contain the member model files.
-    assert eval_job.models_dir.exists(), f"models directory not found at {eval_job.models_dir}"
-    model_files = list(eval_job.models_dir.glob("*.keras"))
-    assert len(model_files) == n_selected, (
-        f"Expected {n_selected} model files in {eval_job.models_dir}, found {len(model_files)}"
-    )
 
     # Operating-point JSON files must exist for each reference.
     from neuralnet.workflows.ringer.models import BinnedSpecialistCommittee
@@ -383,6 +378,8 @@ def threshold_fit_job_test_routine(
         assert len(op_data["models"]) == n_selected
         for model_cfg in op_data["models"]:
             assert "model_path" in model_cfg
+            assert model_cfg["model_path"].endswith("/model.keras")
+            assert (evaluation_output / model_cfg["model_path"]).exists()
             assert "decision_threshold" in model_cfg
             assert "bins" in model_cfg
             assert "preprocessing" in model_cfg
@@ -422,4 +419,186 @@ def threshold_fit_job_test_routine(
     assert pred_df["prediction"].dtype == pl.Boolean
 
     logging.info("Threshold fit job test passed successfully.")
+
+
+# ---------------------------------------------------------------------------
+# Inference job tests
+# ---------------------------------------------------------------------------
+
+
+def test_committee_inference_job(
+    tmp_path: Path,
+    ringer_dataset_dir: Path,
+    ringer_parquet_dataset: "RingerParquetDataset",
+    isolated_executor,
+):
+    """End-to-end test for RingerCommitteeInferenceJob.
+
+    Trains a minimal committee, runs the threshold-fit job, then runs the
+    inference job against the same dataset directory.  Asserts that the
+    output parquet file has the expected columns and row count.
+    """
+    future = isolated_executor.submit(
+        committee_inference_job_test_routine,
+        tmp_path=tmp_path,
+        dataset_dir=ringer_dataset_dir,
+        ringer_parquet_dataset=ringer_parquet_dataset,
+    )
+    exc = future.exception()
+    if exc is not None:
+        logging.error(f"Exception in isolated executor: {exc}")
+        raise exc
+
+
+def committee_inference_job_test_routine(
+    tmp_path: Path,
+    dataset_dir: Path,
+    ringer_parquet_dataset: "RingerParquetDataset",
+) -> None:
+    """Helper that runs inside an isolated process to avoid Keras import side-effects."""
+
+    import os
+
+    os.environ["KERAS_BACKEND"] = "tensorflow"
+
+    from neuralnet.workflows.ringer.training import RingerKerasTrainingJob
+    from neuralnet.workflows.ringer.threshold_fit import (
+        RingerCommitteeThresholdFitJob,
+        ReferencePoint,
+    )
+    from neuralnet.workflows.ringer.inference import RingerCommitteeInferenceJob
+    from neuralnet.submitit import ExecutorConfig
+
+    # ------------------------------------------------------------------
+    # Step 1: Train a minimal committee.
+    # ------------------------------------------------------------------
+    training_output = tmp_path / "training_output"
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+
+    executor_config = ExecutorConfig(
+        cpus_per_task=1,
+        executor_type="debug",
+        logs_dir=logs_dir,
+        name="test_inference_training_job",
+        slurm_partition="test",
+    )
+
+    job_config = {
+        "batch_size": 32,
+        "data_table": "data",
+        "et_col": "et",
+        "et_bins": [{"low": 0.0, "high": 100000.0, "closed": "left"}],
+        "eta_col": "eta",
+        "eta_bins": [{"low": 0.0, "high": 2.5, "closed": "left"}],
+        "fold_col": "fold",
+        "kfold_table": "kfold",
+        "label_col": "label",
+        "norm_strategy": "l1",
+        "rings_col": "rings",
+        "ring_fraction": 2,
+        "model_factory": {
+            "object_type": "mlp",
+            "layers": [
+                {"units": 4, "activation": "relu", "name": "hidden_dense"},
+                {"units": 1, "activation": "sigmoid", "name": "output_dense"},
+            ],
+            "name": "mlp",
+        },
+        "loss": {"object_type": "binary_cross_entropy", "from_logits": False},
+        "optimizer": {"learning_rate": 0.01, "object_type": "adam"},
+        "from_logits": False,
+        "epochs": 1,
+        "logger_name": None,
+        "output_path": training_output,
+        "executor_config": executor_config,
+        "dataset_dir": dataset_dir,
+        "inits": 1,
+        "best_init": {"key": "fit.val.max_sp", "mode": "max"},
+        "best_fold": {"key": "fit.val.max_sp", "mode": "max"},
+    }
+
+    training_job = RingerKerasTrainingJob(**job_config)
+    training_job.submit()
+    RingerKerasTrainingJob.validate_saved_directory(training_output)
+
+    # ------------------------------------------------------------------
+    # Step 2: Run the threshold-fit job with multiple references.
+    # ------------------------------------------------------------------
+    evaluation_output = tmp_path / "evaluation_output"
+    references = {
+        "tight": ReferencePoint(tpr=0.995, color="red", label="Tight"),
+        "medium": ReferencePoint(tpr=0.996, color="orange", label="Medium"),
+    }
+
+    eval_job = RingerCommitteeThresholdFitJob(
+        fit_job_path=training_output,
+        dataset_dir=dataset_dir,
+        output_path=evaluation_output,
+        references=references,
+        dataset_types=["train", "val", "test"],
+        batch_size=32,
+    )
+    eval_job.submit()
+
+    # ------------------------------------------------------------------
+    # Step 3: Run the inference job.
+    # ------------------------------------------------------------------
+    inference_output = tmp_path / "inference_output"
+
+    inference_job = RingerCommitteeInferenceJob(
+        job_path=evaluation_output,
+        dataset_dir=dataset_dir,
+        output_path=inference_output,
+        batch_size=32,
+    )
+    inference_job.submit()
+
+    # ------------------------------------------------------------------
+    # Step 4: Validate outputs.
+    # ------------------------------------------------------------------
+    assert inference_output.exists(), (
+        f"output_path not found at {inference_output}"
+    )
+    assert inference_job.inference_results_path.exists(), (
+        f"inference_results.parquet not found at {inference_job.inference_results_path}"
+    )
+
+    results_df = pl.read_parquet(inference_job.inference_results_path)
+    assert isinstance(results_df, pl.DataFrame)
+
+    # id column must be present with the correct type.
+    assert "id" in results_df.columns, "'id' column missing from inference results"
+    assert results_df["id"].dtype == pl.UInt64, (
+        f"Expected 'id' dtype UInt64, got {results_df['id'].dtype}"
+    )
+
+    # All operating point outputs and predictions must be present.
+    expected_cols = {
+        "id",
+        "tight.output",
+        "tight.prediction",
+        "medium.output",
+        "medium.prediction",
+    }
+    assert set(results_df.columns) == expected_cols, (
+        f"Expected columns {expected_cols}, got {set(results_df.columns)}"
+    )
+
+
+    # Row count must match the full predict_df.
+    expected_rows = ringer_parquet_dataset.predict_df().collect().height
+    assert results_df.height == expected_rows, (
+        f"Expected {expected_rows} rows in inference_results.parquet, got {results_df.height}"
+    )
+
+    # config.json must exist and be loadable.
+    assert inference_job.config_path.exists(), (
+        f"config.json not found at {inference_job.config_path}"
+    )
+    loaded_job = RingerCommitteeInferenceJob.load(inference_output)
+    assert isinstance(loaded_job, RingerCommitteeInferenceJob)
+
+    logging.info("Inference job test passed successfully.")
+
 
