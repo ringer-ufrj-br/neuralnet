@@ -225,3 +225,5 @@ jobs/**
 
 # Example related
 **/dataset/**
+
+*.png
