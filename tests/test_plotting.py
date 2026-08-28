@@ -180,24 +180,38 @@ def quadrant_df() -> pl.DataFrame:
 class TestQuadrantPlot:
     """Tests for :func:`neuralnet.plotting.quadrant_plot`."""
 
-    def test_returns_axes_and_quadrant_data(self, quadrant_df):
-        """Function should return the used Axes and a dict with four arrays."""
-        fig, ax = plt.subplots()
-        result_ax, qdata = quadrant_plot(
+    def test_returns_figure_axes_and_quadrant_data(self, quadrant_df):
+        """Function should return the Figure, two Axes, and a dict with four arrays."""
+        result_fig, top_ax, bottom_ax, qdata = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA", "label": "Model A"},
             model_b_col={"col": "modelB", "label": "Model B"},
             variable_col={"col": "score", "label": "Score"},
-            ax=ax,
         )
-        assert result_ax is ax
-        assert isinstance(result_ax, plt.Axes)
+        assert isinstance(result_fig, plt.Figure)
+        assert isinstance(top_ax, plt.Axes)
+        assert isinstance(bottom_ax, plt.Axes)
         assert set(qdata.keys()) == {"both_false", "both_true", "a_only", "b_only"}
+        # Both axes share x-axis
+        assert bottom_ax._sharex is top_ax or top_ax._sharex is bottom_ax
+        plt.close(result_fig)
+
+    def test_custom_fig_kwargs(self, quadrant_df):
+        """Passing fig_kwargs should configure the created Figure."""
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
+            data=quadrant_df,
+            model_a_col={"col": "modelA"},
+            model_b_col={"col": "modelB"},
+            variable_col={"col": "score"},
+            fig_kwargs={"figsize": (10, 8)},
+        )
+        assert isinstance(fig, plt.Figure)
+        np.testing.assert_allclose(fig.get_size_inches(), (10, 8))
         plt.close(fig)
 
     def test_quadrant_sample_counts(self, quadrant_df):
         """Each quadrant array must contain exactly the right samples."""
-        _, qdata = quadrant_plot(
+        _, _, _, qdata = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
@@ -210,123 +224,144 @@ class TestQuadrantPlot:
         plt.close("all")
 
     def test_axes_labels(self, quadrant_df):
-        """x-label should reflect variable_col label; y-label should be 'Density'."""
-        _, _ = quadrant_plot(
+        """x-label on bottom_ax should reflect variable_col; y-label on top_ax should be 'Density'."""
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score", "label": "My Score"},
         )
-        ax = plt.gca()
-        assert ax.get_xlabel() == "My Score"
-        assert ax.get_ylabel() == "Density"
-        plt.close("all")
+        assert bottom_ax.get_xlabel() == "My Score"
+        assert top_ax.get_ylabel() == "Density"
+        assert bottom_ax.get_ylabel() == "Disagreement (%)"
+        plt.close(fig)
 
     def test_default_xlabel_is_column_name(self, quadrant_df):
         """When label is omitted from variable_col the column name should be used."""
-        _, _ = quadrant_plot(
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score"},
         )
-        ax = plt.gca()
-        assert ax.get_xlabel() == "score"
-        plt.close("all")
+        assert bottom_ax.get_xlabel() == "score"
+        plt.close(fig)
 
-        _, _ = quadrant_plot(
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col="score",
         )
-        ax = plt.gca()
-        assert ax.get_xlabel() == "score"
-        plt.close("all")
+        assert bottom_ax.get_xlabel() == "score"
+        plt.close(fig)
 
-    def test_title_is_set(self, quadrant_df):
-        """When title is provided it should appear on the axes."""
-        fig, ax = plt.subplots()
-        quadrant_plot(
+    def test_title_is_set_on_top_ax(self, quadrant_df):
+        """When title is provided it should appear on the top axes."""
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score", "label": "Score"},
             title="Test Title",
-            ax=ax,
         )
-        assert ax.get_title() == "Test Title"
+        assert top_ax.get_title() == "Test Title"
+        assert bottom_ax.get_title() == ""
         plt.close(fig)
 
     def test_density_false_ylabel(self, quadrant_df):
-        """With density=False the y-label should be 'Counts'."""
-        fig, ax = plt.subplots()
-        quadrant_plot(
+        """With density=False the top y-label should be 'Counts'."""
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score"},
             density=False,
-            ax=ax,
         )
-        assert ax.get_ylabel() == "Counts"
+        assert top_ax.get_ylabel() == "Counts"
+        assert bottom_ax.get_ylabel() == "Disagreement (%)"
         plt.close(fig)
 
     def test_custom_quadrant_config_color(self, quadrant_df):
         """Custom color in quadrant_config should be reflected in the plotted artist."""
-        fig, ax = plt.subplots()
-        quadrant_plot(
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score"},
             quadrant_config={"both_true": {"color": "crimson", "label": "Both accept"}},
-            ax=ax,
         )
-        # The legend texts should contain our custom label
-        legend_texts = [t.get_text() for t in ax.get_legend().get_texts()]
+        # The legend texts on top_ax should contain our custom label
+        legend_texts = [t.get_text() for t in top_ax.get_legend().get_texts()]
         assert any("Both accept" in t for t in legend_texts)
         plt.close(fig)
 
+    def test_custom_quadrant_config_markersize(self, quadrant_df):
+        """Custom markersize in quadrant_config should be reflected in scatter collections."""
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
+            data=quadrant_df,
+            model_a_col={"col": "modelA"},
+            model_b_col={"col": "modelB"},
+            variable_col={"col": "score"},
+            quadrant_config={
+                "both_true": {"markersize": 80.0},
+                "a_only": {"markersize": 50.0},
+            },
+            scatter=True,
+        )
+        top_collections = top_ax.collections
+        assert len(top_collections) == 4
+        np.testing.assert_array_equal(top_collections[1].get_sizes(), [80.0])
+        np.testing.assert_array_equal(top_collections[2].get_sizes(), [50.0])
+
+        bottom_collections = bottom_ax.collections
+        assert len(bottom_collections) == 2
+        np.testing.assert_array_equal(bottom_collections[0].get_sizes(), [50.0])
+        plt.close(fig)
+
     def test_scatter_mode_only_plots_markers(self, quadrant_df):
-        """With scatter=True axes should contain only markers."""
+        """With scatter=True axes should contain markers and no step histogram lines/patches."""
         from matplotlib.collections import PathCollection
 
-        fig, ax = plt.subplots()
-        quadrant_plot(
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA", "label": "Model A"},
             model_b_col={"col": "modelB", "label": "Model B"},
             variable_col={"col": "score", "label": "Score"},
             scatter=True,
-            ax=ax,
         )
-        scatter_artists = [c for c in ax.collections if isinstance(c, PathCollection)]
-        assert len(scatter_artists) > 0
+        top_scatter_artists = [c for c in top_ax.collections if isinstance(c, PathCollection)]
+        bottom_scatter_artists = [c for c in bottom_ax.collections if isinstance(c, PathCollection)]
+        assert len(top_scatter_artists) > 0
+        assert len(bottom_scatter_artists) == 2  # a_only and b_only
         # No histogram bins/lines/patches drawn
-        assert len(ax.patches) == 0
-        assert len(ax.lines) == 0
-        legend = ax.get_legend()
+        assert len(top_ax.patches) == 0
+        assert len(top_ax.lines) == 0
+        assert len(bottom_ax.patches) == 0
+        assert len(bottom_ax.lines) == 0
+        legend = top_ax.get_legend()
         assert legend is not None
         assert len(legend.get_texts()) == 4
+        assert bottom_ax.get_legend() is None
         plt.close(fig)
 
     def test_scatter_false_plots_histograms_only(self, quadrant_df):
-        """With scatter=False the axes should contain histogram step artists and no PathCollection."""
+        """With scatter=False both axes should contain histogram step artists and no PathCollection."""
         from matplotlib.collections import PathCollection
 
-        fig, ax = plt.subplots()
-        quadrant_plot(
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score"},
             scatter=False,
-            ax=ax,
         )
-        scatter_artists = [c for c in ax.collections if isinstance(c, PathCollection)]
-        assert len(scatter_artists) == 0
-        assert len(ax.lines) > 0 or len(ax.patches) > 0
+        top_scatter = [c for c in top_ax.collections if isinstance(c, PathCollection)]
+        bottom_scatter = [c for c in bottom_ax.collections if isinstance(c, PathCollection)]
+        assert len(top_scatter) == 0
+        assert len(bottom_scatter) == 0
+        assert len(top_ax.lines) > 0 or len(top_ax.patches) > 0
+        assert len(bottom_ax.lines) > 0 or len(bottom_ax.patches) > 0
         plt.close(fig)
 
     def test_invalid_scatter_type_raises(self, quadrant_df):
@@ -344,7 +379,7 @@ class TestQuadrantPlot:
 
     def test_lazy_frame_input(self, quadrant_df):
         """Should accept a LazyFrame and produce identical quadrant data."""
-        _, qdata_eager = quadrant_plot(
+        _, _, _, qdata_eager = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
@@ -352,7 +387,7 @@ class TestQuadrantPlot:
         )
         plt.close("all")
 
-        _, qdata_lazy = quadrant_plot(
+        _, _, _, qdata_lazy = quadrant_plot(
             data=quadrant_df.lazy(),
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
@@ -380,58 +415,66 @@ class TestQuadrantPlot:
     def test_explicit_bin_edges(self, quadrant_df):
         """Passing a np.ndarray for bins should be accepted without error."""
         edges = np.linspace(-4.0, 4.0, 21)
-        fig, ax = plt.subplots()
-        result_ax, _ = quadrant_plot(
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score"},
             bins=edges,
-            ax=ax,
         )
-        assert isinstance(result_ax, plt.Axes)
+        assert isinstance(top_ax, plt.Axes)
+        assert isinstance(bottom_ax, plt.Axes)
         plt.close(fig)
 
-    def test_uses_current_ax_when_none_passed(self, quadrant_df):
-        """When ax=None the function should draw into plt.gca()."""
-        fig, expected_ax = plt.subplots()
-        plt.sca(expected_ax)
-        result_ax, _ = quadrant_plot(
+    def test_creates_fig_when_none_passed(self, quadrant_df):
+        """When fig_kwargs=None the function should create a new Figure."""
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score"},
         )
-        assert result_ax is expected_ax
+        assert isinstance(fig, plt.Figure)
+        assert len(fig.axes) == 2
         plt.close(fig)
 
-    def test_legend_contains_all_four_quadrants(self, quadrant_df):
-        """The legend should have exactly four entries (one per quadrant)."""
-        fig, ax = plt.subplots()
-        quadrant_plot(
+    def test_invalid_fig_kwargs_raises(self, quadrant_df):
+        """Passing a non-dict to fig_kwargs should raise TypeError."""
+        with pytest.raises(TypeError, match="fig_kwargs must be a dict or None"):
+            quadrant_plot(
+                data=quadrant_df,
+                model_a_col={"col": "modelA"},
+                model_b_col={"col": "modelB"},
+                variable_col={"col": "score"},
+                fig_kwargs="invalid",
+            )
+        plt.close("all")
+
+    def test_legend_contains_all_four_quadrants_on_top_only(self, quadrant_df):
+        """The legend should have exactly four entries on top_ax and none on bottom_ax."""
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score"},
-            ax=ax,
         )
-        legend = ax.get_legend()
+        legend = top_ax.get_legend()
         assert legend is not None
         assert len(legend.get_texts()) == 4
+        assert bottom_ax.get_legend() is None
         plt.close(fig)
 
     def test_custom_hist_kwargs(self, quadrant_df):
         """Custom hist_kwargs should be forwarded without error."""
-        fig, ax = plt.subplots()
-        quadrant_plot(
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
             data=quadrant_df,
             model_a_col={"col": "modelA"},
             model_b_col={"col": "modelB"},
             variable_col={"col": "score"},
             hist_kwargs={"linewidth": 3.0, "alpha": 0.9},
-            ax=ax,
         )
-        assert isinstance(ax, plt.Axes)
+        assert isinstance(top_ax, plt.Axes)
+        assert isinstance(bottom_ax, plt.Axes)
         plt.close(fig)
 
     def test_empty_quadrant_scatter_and_hist(self):
@@ -444,14 +487,83 @@ class TestQuadrantPlot:
             }
         )
         for scatter_val in [True, False]:
-            fig, ax = plt.subplots()
-            quadrant_plot(
+            fig, top_ax, bottom_ax, _ = quadrant_plot(
                 data=df,
                 model_a_col={"col": "modelA"},
                 model_b_col={"col": "modelB"},
                 variable_col={"col": "score", "label": "Score"},
                 scatter=scatter_val,
-                ax=ax,
             )
-            assert len(ax.get_legend().get_texts()) == 4
+            assert len(top_ax.get_legend().get_texts()) == 4
+            assert bottom_ax.get_legend() is None
             plt.close(fig)
+
+    def test_single_model_approval_percentage_values(self):
+        """Percentages plotted on bottom_ax must equal (N_only / N_total) * 100% per bin."""
+        # 1 bin scenario: [0.0, 10.0]
+        # Total: 10 samples (2 both_false, 3 both_true, 4 a_only, 1 b_only)
+        # a_only percentage: 4/10 = 40.0%
+        # b_only percentage: 1/10 = 10.0%
+        df = pl.DataFrame(
+            {
+                "modelA": [False, False, True, True, True, True, True, True, True, False],
+                "modelB": [False, False, True, True, True, False, False, False, False, True],
+                "score": [5.0] * 10,
+            }
+        )
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
+            data=df,
+            model_a_col={"col": "modelA"},
+            model_b_col={"col": "modelB"},
+            variable_col={"col": "score"},
+            bins=np.array([0.0, 10.0]),
+            scatter=True,
+        )
+        # bottom_ax collections: collection 0 is a_only, collection 1 is b_only
+        collections = bottom_ax.collections
+        assert len(collections) == 2
+        offsets_a = collections[0].get_offsets()
+        offsets_b = collections[1].get_offsets()
+        np.testing.assert_allclose(offsets_a[0, 1], 40.0)
+        np.testing.assert_allclose(offsets_b[0, 1], 10.0)
+        plt.close(fig)
+
+    def test_maintains_colors_and_markers_on_bottom_ax(self):
+        """bottom_ax scatter must preserve custom colors, markers, and markersize configured for quadrants."""
+        df = pl.DataFrame(
+            {
+                "modelA": [True, False, True, False],
+                "modelB": [False, True, True, False],
+                "score": [1.0, 2.0, 3.0, 4.0],
+            }
+        )
+        custom_config = {
+            "a_only": {"color": "magenta", "marker": "D", "markersize": 45.0},
+            "b_only": {"color": "cyan", "marker": "P", "markersize": 60.0},
+        }
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
+            data=df,
+            model_a_col={"col": "modelA"},
+            model_b_col={"col": "modelB"},
+            variable_col={"col": "score"},
+            quadrant_config=custom_config,
+            scatter=True,
+        )
+        assert len(bottom_ax.collections) == 2
+        np.testing.assert_array_equal(bottom_ax.collections[0].get_sizes(), [45.0])
+        np.testing.assert_array_equal(bottom_ax.collections[1].get_sizes(), [60.0])
+        plt.close(fig)
+
+    def test_axes_share_x(self, quadrant_df):
+        """Setting xlim on top_ax should automatically update bottom_ax xlim."""
+        fig, top_ax, bottom_ax, _ = quadrant_plot(
+            data=quadrant_df,
+            model_a_col={"col": "modelA"},
+            model_b_col={"col": "modelB"},
+            variable_col={"col": "score"},
+        )
+        top_ax.set_xlim(-2.5, 2.5)
+        np.testing.assert_allclose(bottom_ax.get_xlim(), (-2.5, 2.5))
+        plt.close(fig)
+
+
