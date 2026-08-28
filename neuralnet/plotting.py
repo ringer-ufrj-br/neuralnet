@@ -885,26 +885,33 @@ class QuadrantHistConfig(TypedDict, total=False):
         scatter markers.
     marker : str
         Matplotlib marker string.  Used only when *scatter* is ``True``.
+    markersize : float
+        Marker size in points**2 (passed to ``s`` in :func:`matplotlib.axes.Axes.scatter`).
+        Used only when *scatter* is ``True``.
+    alpha : float
+        Opacity for the histogram step line and scatter markers.
     label : str
         Legend label override.  If omitted a default label with the sample
         count is used.
     hist_kwargs : dict
         Extra keyword arguments forwarded to :func:`matplotlib.axes.Axes.hist`
-        for this quadrant (e.g. ``alpha``, ``linewidth``).
+        for this quadrant (e.g. ``linewidth``).
     """
 
     color: str
     marker: str
+    markersize: float
+    alpha: float
     label: str
     hist_kwargs: dict
 
 
 # Default visual config for each quadrant (overridable by the caller).
 _QUADRANT_DEFAULTS: dict[str, QuadrantHistConfig] = {
-    "both_false": {"color": "tab:blue", "marker": "o"},
-    "both_true": {"color": "tab:red", "marker": "s"},
-    "a_only": {"color": "tab:green", "marker": "^"},
-    "b_only": {"color": "tab:orange", "marker": "v"},
+    "both_false": {"color": "black", "marker": "o", 'alpha': 0.3},
+    "both_true": {"color": "black", "marker": "s"},
+    "a_only": {"color": "blue", "marker": "^"},
+    "b_only": {"color": "red", "marker": "v"},
 }
 
 
@@ -918,11 +925,11 @@ def quadrant_plot(
     density: bool = True,
     scatter: bool = False,
     quadrant_config: dict[str, QuadrantHistConfig] | None = None,
-    ax: plt.Axes | None = None,
+    fig_kwargs: dict | None = None,
     hist_kwargs: dict | None = None,
     title: str | None = None,
     legend_kwargs: dict | None = None,
-) -> tuple[plt.Axes, dict[str, np.ndarray]]:
+) -> tuple[plt.Figure, plt.Axes, plt.Axes, dict[str, np.ndarray]]:
     """Overlay histograms of *variable_col* split by the four prediction quadrants.
 
     The four quadrants are defined by the Boolean outputs of two binary
@@ -958,7 +965,7 @@ def quadrant_plot(
         non-empty quadrant values so that comparisons across quadrants are
         meaningful.  Pass a ``np.ndarray`` to supply explicit edges.
     density : bool, default=True
-        If ``True`` each histogram / marker distribution is normalised to unit area.
+        If ``True`` each histogram / marker distribution on the top axis is normalised to unit area.
     scatter : bool, default=False
         If ``True``, plot only the markers at the bin centres without drawing
         the histogram bins.
@@ -971,23 +978,26 @@ def quadrant_plot(
             quadrant_config = {
                 "both_true": {"color": "crimson", "marker": "*", "label": "Both accept"},
             }
-    ax : plt.Axes | None, optional
-        Axes to draw into.  If ``None``, :func:`matplotlib.pyplot.gca` is
-        used.
+    fig_kwargs : dict | None, optional
+        Keyword arguments forwarded to :func:`matplotlib.pyplot.figure`.
     hist_kwargs : dict | None, optional
         Shared keyword arguments forwarded to every
         :func:`matplotlib.axes.Axes.hist` call (e.g. ``alpha``,
         ``linewidth``).  Per-quadrant ``hist_kwargs`` inside
         *quadrant_config* take precedence over these.
     title : str | None, optional
-        Axes title.
+        Axes title (placed on top axis).
     legend_kwargs : dict | None, optional
         Keyword arguments forwarded to :func:`matplotlib.axes.Axes.legend`.
 
     Returns
     -------
-    ax : plt.Axes
-        The axes that was drawn into.
+    fig : plt.Figure
+        The figure containing the subplots.
+    top_ax : plt.Axes
+        The top axes containing the 4-quadrant distributions.
+    bottom_ax : plt.Axes
+        The bottom axes containing the percentage of data that only one model approves.
     quadrant_data : dict[str, np.ndarray]
         Mapping from quadrant name to the 1-D float array of *variable_col*
         values that belong to that quadrant.  Useful for downstream analysis.
@@ -1042,10 +1052,18 @@ def quadrant_plot(
     }
 
     # ------------------------------------------------------------------
-    # Resolve axes
+    # Create figure and 2-subplot GridSpec layout (3:1 ratio)
     # ------------------------------------------------------------------
-    if ax is None:
-        ax = plt.gca()
+    if fig_kwargs is None:
+        fig = plt.figure()
+    elif isinstance(fig_kwargs, dict):
+        fig = plt.figure(**fig_kwargs)
+    else:
+        raise TypeError("fig_kwargs must be a dict or None.")
+
+    grid_spec = GridSpec(4, 1, figure=fig)
+    top_ax = fig.add_subplot(grid_spec[:3, 0])
+    bottom_ax = fig.add_subplot(grid_spec[3:, 0], sharex=top_ax)
 
     # ------------------------------------------------------------------
     # Resolve shared histogram kwargs
@@ -1082,56 +1100,62 @@ def quadrant_plot(
         resolved[qname] = {**defaults, **override}  # type: ignore[misc]
 
     # ------------------------------------------------------------------
-    # Plot each quadrant
+    # Plot each quadrant on top_ax
     # ------------------------------------------------------------------
     default_labels: dict[str, str] = {
-        "both_false": f"Both False (n={len(quadrant_data['both_false'])})",
-        "both_true": f"Both True (n={len(quadrant_data['both_true'])})",
-        "a_only": f"{a_label} only (n={len(quadrant_data['a_only'])})",
-        "b_only": f"{b_label} only (n={len(quadrant_data['b_only'])})",
+        "both_false": f"Both False (N={len(quadrant_data['both_false'])})",
+        "both_true": f"Both True (N={len(quadrant_data['both_true'])})",
+        "a_only": f"{a_label} approved (N={len(quadrant_data['a_only'])})",
+        "b_only": f"{b_label} approved (N={len(quadrant_data['b_only'])})",
     }
+
+    centres = (bin_edges[:-1] + bin_edges[1:]) / 2
 
     for qname, arr in quadrant_data.items():
         cfg = resolved[qname]
         color = cfg.get("color", "tab:blue")
         marker = cfg.get("marker", "o")
+        markersize = cfg.get("markersize", None)
         label = cfg.get("label", default_labels[qname])
         per_quad_hist_kw = {**base_hist_kw, **cfg.get("hist_kwargs", {})}
+        alpha = cfg.get("alpha", per_quad_hist_kw.get("alpha", 0.7 if scatter else 0.6))
+        per_quad_hist_kw["alpha"] = alpha
 
         if scatter:
             if len(arr) == 0:
-                ax.scatter(
+                top_ax.scatter(
                     [],
                     [],
                     color=color,
                     marker=marker,
+                    s=markersize,
                     edgecolors="k",
-                    alpha=0.7,
+                    alpha=alpha,
                     label=label,
                     zorder=3,
                 )
                 continue
 
             weights = per_quad_hist_kw.get("weights", None)
-            heights, edges = np.histogram(arr, bins=bin_edges, density=density, weights=weights)
-            centres = (edges[:-1] + edges[1:]) / 2
-            ax.scatter(
+            heights, _ = np.histogram(arr, bins=bin_edges, density=density, weights=weights)
+            top_ax.scatter(
                 centres,
                 heights,
                 color=color,
                 marker=marker,
+                s=markersize,
                 edgecolors="k",
-                alpha=0.7,
+                alpha=alpha,
                 label=label,
                 zorder=3,
             )
         else:
             if len(arr) == 0:
                 # Add a legend proxy even for empty quadrants
-                ax.hist([], bins=bin_edges, color=color, label=label, **per_quad_hist_kw)
+                top_ax.hist([], bins=bin_edges, color=color, label=label, **per_quad_hist_kw)
                 continue
 
-            ax.hist(
+            top_ax.hist(
                 arr,
                 bins=bin_edges,
                 color=color,
@@ -1141,18 +1165,87 @@ def quadrant_plot(
             )
 
     # ------------------------------------------------------------------
+    # Plot single-model approval percentages on bottom_ax
+    # ------------------------------------------------------------------
+    counts_total, _ = np.histogram(all_values, bins=bin_edges)
+    valid_bins = counts_total > 0
+
+    for qname in ["a_only", "b_only"]:
+        cfg = resolved[qname]
+        color = cfg.get("color", "tab:blue")
+        marker = cfg.get("marker", "o")
+        markersize = cfg.get("markersize", None)
+        per_quad_hist_kw = {**base_hist_kw, **cfg.get("hist_kwargs", {})}
+        alpha = cfg.get("alpha", per_quad_hist_kw.get("alpha", 0.7 if scatter else 0.6))
+        per_quad_hist_kw["alpha"] = alpha
+        arr = quadrant_data[qname]
+
+        if len(arr) == 0 or not np.any(valid_bins):
+            pct = np.zeros_like(centres)
+        else:
+            counts_q, _ = np.histogram(arr, bins=bin_edges)
+            pct = np.divide(
+                counts_q * 100.0,
+                counts_total,
+                out=np.zeros_like(counts_q, dtype=float),
+                where=valid_bins,
+            )
+
+        if scatter:
+            if len(arr) == 0 or not np.any(valid_bins):
+                bottom_ax.scatter(
+                    [],
+                    [],
+                    color=color,
+                    marker=marker,
+                    s=markersize,
+                    edgecolors="k",
+                    alpha=alpha,
+                    zorder=3,
+                )
+            else:
+                bottom_ax.scatter(
+                    centres[valid_bins],
+                    pct[valid_bins],
+                    color=color,
+                    marker=marker,
+                    s=markersize,
+                    edgecolors="k",
+                    alpha=alpha,
+                    zorder=3,
+                )
+        else:
+            if len(arr) == 0:
+                bottom_ax.hist([], bins=bin_edges, color=color, **per_quad_hist_kw)
+            else:
+                bottom_ax.hist(
+                    centres,
+                    bins=bin_edges,
+                    weights=pct,
+                    color=color,
+                    **per_quad_hist_kw,
+                )
+
+    # ------------------------------------------------------------------
     # Axes formatting
     # ------------------------------------------------------------------
-    ax.set_xlabel(var_label, fontsize="medium")
-    ax.set_ylabel("Density" if density else "Counts", fontsize="medium")
-    ax.grid(linestyle="--", alpha=0.2, color="k")
+    top_ax.set_ylabel("Density" if density else "Counts", fontsize="small")
+    top_ax.grid(linestyle="--", alpha=0.2, color="k")
+    top_ax.tick_params(axis="x", which="both", labelbottom=False)
+    top_ax.tick_params(axis="y", which="both", labelsize="small")
 
     if title is not None:
-        ax.set_title(title, fontsize="large")
+        top_ax.set_title(title, fontsize="large")
 
     legend_kw: dict = {"loc": "best", "fontsize": "small"}
     if legend_kwargs is not None:
         legend_kw.update(legend_kwargs)
-    ax.legend(**legend_kw)
+    top_ax.legend(**legend_kw)
 
-    return ax, quadrant_data
+    bottom_ax.set_xlabel(var_label, fontsize="small", loc='left')
+    bottom_ax.set_ylabel("Disagreement (%)", fontsize="small")
+    bottom_ax.grid(linestyle="--", alpha=0.2, color="k")
+    bottom_ax.tick_params(axis="x", which="both", labelsize="small")
+    bottom_ax.tick_params(axis="y", which="both", labelsize="small")
+
+    return fig, top_ax, bottom_ax, quadrant_data
